@@ -618,7 +618,6 @@ class DataConn(DAPConn):
 
                 elif lane == 'questions':
                     try:
-                        mime_type = conn_pipe.mime_type
                         if mime_type == 'application/json':
                             # Field-extraction mode: pull the configured field out of
                             # the JSON payload and wrap it in a Question object.
