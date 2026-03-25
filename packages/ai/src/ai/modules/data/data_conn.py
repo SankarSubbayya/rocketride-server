@@ -190,6 +190,12 @@ class DataConn(DAPConn):
                 break
         return str(value) if value is not None else json.dumps(json_data)
 
+    @staticmethod
+    def _is_json_mime(mime_type: str) -> bool:
+        """Return whether the MIME type denotes JSON (application/json or *+json structured syntax)."""
+        media_type = mime_type.split(';', 1)[0].strip().lower()
+        return media_type == 'application/json' or media_type.endswith('+json')
+
     def _determine_lane(self, mime_type: str, pipe_instance: IServiceFilterPipe) -> str:
         """
         Determine the appropriate data lane based on MIME type and available listeners.
@@ -218,7 +224,7 @@ class DataConn(DAPConn):
 
         # If this is a JSON payload and there is a question listener with a configured
         # field mapping, extract the field and route it to the questions lane
-        elif mime_type == 'application/json' and 'questions' in listeners and self._target.taskConfig.get('questionField'):
+        elif self._is_json_mime(mime_type) and 'questions' in listeners and self._target.taskConfig.get('questionField'):
             return 'questions'
 
         # If this is text content and we have a text listener
@@ -618,7 +624,9 @@ class DataConn(DAPConn):
 
                 elif lane == 'questions':
                     try:
-                        if mime_type == 'application/json':
+                        # Extraction for generic JSON; native Question MIME must use validate path
+                        # (application/rocketride-question* matches +json and would mis-route).
+                        if self._is_json_mime(mime_type) and not mime_type.startswith('application/rocketride-question'):
                             # Field-extraction mode: pull the configured field out of
                             # the JSON payload and wrap it in a Question object.
                             json_data = json.loads(data.decode('utf-8'))
