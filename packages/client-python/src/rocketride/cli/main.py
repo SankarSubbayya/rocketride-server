@@ -68,6 +68,8 @@ from .commands.events import EventsCommand
 from .commands.list import ListCommand
 from .commands.store import StoreCommand
 
+from .._engine.cli import register_engine_commands, handle_engine_command
+
 try:
     # Try importing from installed package first
     from rocketride import RocketRideClient
@@ -671,6 +673,9 @@ class RocketRideCLI:
             help='Page number (0-indexed, page size is 100)',
         )
 
+        # Engine management commands (rocketride engine ... / rocketride e ...)
+        register_engine_commands(subparsers)
+
         return parser
 
     async def run(self) -> int:
@@ -699,6 +704,10 @@ class RocketRideCLI:
         if not self.args.command:
             parser.print_help()
             return 1
+
+        # Engine commands are self-contained — dispatch before client validation
+        if self.args.command in ('engine', 'e'):
+            return await handle_engine_command(self.args)
 
         # Validate required authentication
         if not self.args.apikey:

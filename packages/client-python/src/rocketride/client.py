@@ -40,7 +40,7 @@ Basic Usage:
 """
 
 import os
-from .core import DAPClient, TransportWebSocket, RocketRideException, CONST_DEFAULT_WEB_CLOUD
+from .core import DAPClient, RocketRideException
 from .mixins.connection import ConnectionMixin
 from .mixins.execution import ExecutionMixin
 from .mixins.data import DataMixin
@@ -117,8 +117,8 @@ class RocketRideClient(
 
     def __init__(
         self,
-        uri: str = "",
-        auth: str = "",
+        uri: str = '',
+        auth: str = '',
         **kwargs,
     ):
         """
@@ -147,7 +147,7 @@ class RocketRideClient(
         if env is None:
             # Start with process environment so ROCKETRIDE_* vars work out of the box.
             self._env = dict(os.environ)
-            
+
             # Try to load .env file
             try:
                 env_path = os.path.join(os.getcwd(), '.env')
@@ -164,8 +164,7 @@ class RocketRideClient(
                                 key = key.strip()
                                 value = value.strip()
                                 # Remove quotes if present
-                                if (value.startswith('"') and value.endswith('"')) or \
-                                   (value.startswith("'") and value.endswith("'")):
+                                if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                                     value = value[1:-1]
                                 # Preserve already-defined process env values.
                                 self._env.setdefault(key, value)
@@ -176,17 +175,35 @@ class RocketRideClient(
             # Use the provided env dictionary
             self._env = dict(env)
 
-        # If we didn't get the URI, look at the env. If not there,
-        # use the default
+        # Engine auto-spawn: when no URI is provided and ROCKETRIDE_URI is not
+        # set, we'll auto-manage a local engine instance instead of defaulting
+        # to the cloud endpoint.
+        self._engine_manager = None  # type: Optional['EngineManager']
+        self._engine_we_started = False
+
         if not uri:
-            uri = self._env.get('ROCKETRIDE_URI', CONST_DEFAULT_WEB_CLOUD)
+            env_uri = self._env.get('ROCKETRIDE_URI', '')
+            if env_uri:
+                uri = env_uri
+            else:
+                # No URI anywhere — activate engine auto-spawn.
+                # The actual engine start happens in connect().
+                from ._engine.manager import EngineManager
+
+                self._engine_manager = EngineManager()
+                uri = ''  # Will be set during connect()
 
         if not auth:
             auth = self._env.get('ROCKETRIDE_APIKEY', None)
 
         # Normalize the URI into a fully-formed WebSocket address
+        # (skip if engine manager will provide the URI later)
         from .mixins.connection import ConnectionMixin
-        self._uri = ConnectionMixin._get_websocket_uri(uri)
+
+        if uri:
+            self._uri = ConnectionMixin._get_websocket_uri(uri)
+        else:
+            self._uri = ''
         self._apikey = auth
 
         # Initialize chat question counter
@@ -212,14 +229,28 @@ class RocketRideClient(
         """
         Enter async context manager - automatically connects to server.
 
+        When no URI was provided, this will auto-spawn a local engine
+        instance before connecting.
+
         Returns:
             self: The connected client instance
         """
+        if self._engine_manager:
+            uri, we_started = await self._engine_manager.ensure_running()
+            self._engine_we_started = we_started
+            from .mixins.connection import ConnectionMixin
+
+            self._uri = ConnectionMixin._get_websocket_uri(uri)
         await self.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """
         Exit async context manager - automatically disconnects from server.
+
+        Tears down the auto-spawned engine if we started it.
         """
         await self.disconnect()
+        if self._engine_manager and self._engine_we_started:
+            await self._engine_manager.teardown()
+            self._engine_we_started = False

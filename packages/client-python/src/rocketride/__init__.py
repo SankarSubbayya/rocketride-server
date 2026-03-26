@@ -37,15 +37,15 @@ The RocketRide Client SDK enables you to:
 
 Quick Start:
     from rocketride import RocketRideClient, Question
-    
+
     # Connect and process data
     async with RocketRideClient(auth='your_api_key') as client:
         # Start a pipeline
         result = await client.use(filepath='pipeline.json')
-        
+
         # Send data for processing
         response = await client.send(result['token'], 'your data')
-        
+
         # Chat with AI
         question = Question()
         question.addQuestion('What are the key findings?')
@@ -97,7 +97,12 @@ from .types import (
 )
 
 from .client import RocketRideClient, RocketRideException
-from .core.exceptions import AuthenticationException
+from .core.exceptions import (
+    AuthenticationException,
+    UnsupportedPlatformError,
+    EngineError,
+    EngineNotFoundError,
+)
 
 from .core.constants import (
     CONST_DEFAULT_SERVICE,
@@ -117,6 +122,9 @@ __all__ = [
     'RocketRideClientConfig',
     'RocketRideException',
     'AuthenticationException',
+    'UnsupportedPlatformError',
+    'EngineError',
+    'EngineNotFoundError',
     'CONST_DEFAULT_SERVICE',
     'CONST_DEFAULT_WEB_CLOUD',
     'CONST_DEFAULT_WEB_HOST',

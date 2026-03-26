@@ -242,3 +242,21 @@ class ValidationException(RocketRideException):
     """
 
     pass
+
+
+class UnsupportedPlatformError(Exception):
+    """Raised when the current platform is not supported for engine downloads."""
+
+    pass
+
+
+class EngineError(Exception):
+    """Base exception for engine management failures (spawn, download, state)."""
+
+    pass
+
+
+class EngineNotFoundError(EngineError):
+    """Raised when no compatible engine binary is available and download failed."""
+
+    pass
