@@ -124,18 +124,19 @@ async def _cmd_list(args) -> int:
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
-    # ── Column definitions ───────────────────────────────────────
-    cols = [
-        ('version', 12),
-        ('id', 4),
-        ('pid', 8),
-        ('port', 7),
-        ('owner', 6),
-        ('status', 10),
-        ('restarted', 9),
-        ('uptime', 12),
-        ('memory', 10),
-    ]
+    # ── Column definitions (minimum widths) ────────────────────────
+    col_names = ['version', 'id', 'pid', 'port', 'owner', 'status', 'restarted', 'uptime', 'memory']
+    min_widths = {
+        'version': 7,
+        'id': 2,
+        'pid': 3,
+        'port': 4,
+        'owner': 5,
+        'status': 6,
+        'restarted': 9,
+        'uptime': 6,
+        'memory': 6,
+    }
 
     # Build rows
     from datetime import datetime, timezone
@@ -145,7 +146,7 @@ async def _cmd_list(args) -> int:
     for inst in instances:
         pid = inst['pid']
         alive = _is_pid_alive(pid)
-        status_text = 'running' if alive else 'stopped'
+        status_text = 'online' if alive else 'stopped'
         status_color = GREEN if alive else RED
 
         # Calculate uptime
@@ -194,6 +195,16 @@ async def _cmd_list(args) -> int:
                 'memory': memory,
             }
         )
+
+    # ── Compute dynamic column widths ──────────────────────────────
+    col_widths = {name: max(min_widths[name], len(name)) for name in col_names}
+    for row in rows:
+        for name in col_names:
+            val = row[name]
+            text = val[1] if isinstance(val, tuple) else val
+            col_widths[name] = max(col_widths[name], len(text))
+
+    cols = [(name, col_widths[name]) for name in col_names]
 
     # ── Render table ─────────────────────────────────────────────
     GRAY = '\033[38;2;100;100;100m'  # border color
@@ -244,55 +255,69 @@ async def _cmd_list(args) -> int:
 
 async def _cmd_start(args) -> int:
     instance_id = getattr(args, 'id', None)
+    from .platform import normalize_version
+
     version = getattr(args, 'version', None)
     explicit_port = getattr(args, 'port', None)
 
-    # Resolve version
-    if not version:
-        compat = get_compat_range()
-        # Check for installed versions first
-        from packaging.specifiers import SpecifierSet
-        from packaging.version import Version
-
-        spec = SpecifierSet(compat)
-        engines_root = rocketride_home() / 'engines'
-        installed = []
-        if engines_root.exists():
-            for entry in engines_root.iterdir():
-                if not entry.is_dir():
-                    continue
-                try:
-                    v = Version(entry.name)
-                except Exception:
-                    continue
-                if v in spec and engine_binary(entry.name).exists():
-                    installed.append((v, entry.name))
-
-        if installed:
-            installed.sort(key=lambda x: x[0], reverse=True)
-            version = installed[0][1]
-            print(f'Using installed engine v{version}')
-        else:
-            print('No compatible engine installed. Downloading...')
-            version = await resolve_compatible_version(compat)
-            await download_engine(version)
-            print(f'Downloaded engine v{version}')
-
-    binary = engine_binary(version)
-    if not binary.exists():
-        print(f'Engine binary not found for v{version}. Run: rocketride engine install {version}')
-        return 1
-
-    port = explicit_port or find_available_port()
+    if version:
+        version = normalize_version(version)
 
     async with StateDB() as db:
         if not instance_id:
             instance_id = await db.next_id()
 
+        # If an ID was explicitly provided, it must already exist in the DB
+        existing = None
+        if instance_id:
+            existing = await db.get(instance_id)
+            if not existing:
+                print(f'No instance found with id: {instance_id}')
+                print('Use "rocketride engine install" to create a new instance first.')
+                return 1
+            if not version:
+                version = existing['version']
+
+        # Resolve version if still unknown (new instance, no --version)
+        if not version:
+            compat = get_compat_range()
+            from packaging.specifiers import SpecifierSet
+            from packaging.version import Version
+
+            spec = SpecifierSet(compat)
+            engines_root = rocketride_home() / 'engines'
+            installed = []
+            if engines_root.exists():
+                for entry in engines_root.iterdir():
+                    if not entry.is_dir():
+                        continue
+                    try:
+                        v = Version(entry.name)
+                    except Exception:
+                        continue
+                    if v in spec and engine_binary(entry.name).exists():
+                        installed.append((v, entry.name))
+
+            if installed:
+                installed.sort(key=lambda x: x[0], reverse=True)
+                version = installed[0][1]
+                print(f'Using installed engine v{version}')
+            else:
+                print('No compatible engine installed. Downloading...')
+                version = await resolve_compatible_version(compat)
+                await download_engine(version)
+                print(f'Downloaded engine v{version}')
+
+        binary = engine_binary(version)
+        if not binary.exists():
+            print(f'Engine binary not found for v{version}. Run: rocketride engine install {version}')
+            return 1
+
+        port = explicit_port or find_available_port()
+
         # Increment restart_count on every start after the first.
         # Log files exist = instance was started before.
         restart_count = 0
-        existing = await db.get(instance_id)
         if existing:
             prev_count = existing.get('restart_count', 0)
             has_run_before = (logs_dir(instance_id) / 'stderr.log').exists()
@@ -300,14 +325,21 @@ async def _cmd_start(args) -> int:
 
         print(f'Starting engine v{version} on port {port} (id: {instance_id})...')
         pid = await spawn_engine(binary, port, instance_id)
-        await db.register(instance_id, pid, port, version, 'cli', restart_count=restart_count)
 
     try:
         log_file = logs_dir(instance_id) / 'stderr.log'
-        await wait_healthy(port, log_file=log_file)
+        await wait_healthy(port, pid=pid, log_file=log_file)
+        # Only persist pid/port once the engine is confirmed healthy
+        async with StateDB() as db:
+            await db.register(instance_id, pid, port, version, 'cli', restart_count=restart_count)
         return 0
     except Exception as e:
         print(f'\nEngine started but health check failed: {e}')
+        # Kill the orphaned process so it doesn't escape tracking
+        await stop_engine(pid)
+        # Reset to stopped state — don't leave stale pid/port in DB
+        async with StateDB() as db:
+            await db.register(instance_id, 0, 0, version, 'cli', restart_count=restart_count)
         return 1
 
 
@@ -336,9 +368,13 @@ async def _cmd_stop(args) -> int:
 
 
 async def _cmd_install(args) -> int:
+    from .platform import normalize_version
+
     version = getattr(args, 'version', None)
 
-    if not version:
+    if version:
+        version = normalize_version(version)
+    else:
         print('Resolving latest compatible version...')
         compat = get_compat_range()
         version = await resolve_compatible_version(compat)

@@ -37,12 +37,29 @@ def get_platform() -> Tuple[str, str]:
     raise UnsupportedPlatformError(f'Unsupported platform: {system} {machine}. Supported platforms: macOS ARM64, Linux x64, Windows x64.')
 
 
+def normalize_version(version: str) -> str:
+    """Strip a leading ``v`` from a version string if present."""
+    return version.lstrip('v')
+
+
+def _base_version(version: str) -> str:
+    """Strip prerelease suffixes (e.g. ``-prerelease``) from a version string.
+
+    The release tag keeps the suffix, but the asset filename does not.
+    """
+    for suffix in ('-prerelease', '-beta', '-alpha', '-rc'):
+        if suffix in version:
+            return version.split(suffix)[0]
+    return version
+
+
 def asset_name(version: str) -> str:
     """Return the release asset filename for the given version and current platform."""
     os_slug, arch_slug = get_platform()
     ext = 'zip' if os_slug == 'win' else 'tar.gz'
     slug = f'{os_slug}{arch_slug}' if os_slug == 'win' else f'{os_slug}-{arch_slug}'
-    return f'rocketride-server-v{version}-{slug}.{ext}'
+    base = _base_version(version)
+    return f'rocketride-server-v{base}-{slug}.{ext}'
 
 
 def release_tag(version: str) -> str:

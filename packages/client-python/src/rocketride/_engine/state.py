@@ -167,7 +167,7 @@ class StateDB:
 
     async def get_all(self) -> List[Dict[str, Any]]:
         """Get all registered instances."""
-        cursor = await self._db.execute('SELECT * FROM instances')
+        cursor = await self._db.execute('SELECT * FROM instances ORDER BY CAST(id AS INTEGER) ASC')
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 

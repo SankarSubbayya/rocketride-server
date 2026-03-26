@@ -112,22 +112,28 @@ async def stop_engine(pid: int, timeout: float = 10.0) -> None:
 
 async def wait_healthy(
     port: int,
+    pid: int = 0,
     timeout: float = 600.0,
     log_file: Path | None = None,
 ) -> None:
     """Poll the engine's HTTP endpoint until it responds.
+
+    If *pid* is provided, checks that the process is still alive each
+    iteration — exits immediately if the engine crashes.
 
     If *log_file* is provided, tails it to stdout while waiting so the
     user can see engine startup output in real time.
 
     Raises EngineError if the engine doesn't become healthy within timeout.
     """
+    from .state import _is_pid_alive
+
     url = f'http://127.0.0.1:{port}'
     deadline = asyncio.get_event_loop().time() + timeout
     file_pos = 0
 
-    while asyncio.get_event_loop().time() < deadline:
-        # Stream new log content
+    def _flush_log():
+        nonlocal file_pos
         if log_file and log_file.exists():
             try:
                 with open(log_file, 'r') as f:
@@ -140,21 +146,19 @@ async def wait_healthy(
             except OSError:
                 pass
 
+    while asyncio.get_event_loop().time() < deadline:
+        _flush_log()
+
+        # Check if the process has crashed
+        if pid and not _is_pid_alive(pid):
+            _flush_log()
+            raise EngineError(f'Engine process (PID {pid}) exited before becoming healthy')
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
                     if resp.status < 500:
-                        # Flush any remaining log output
-                        if log_file and log_file.exists():
-                            try:
-                                with open(log_file, 'r') as f:
-                                    f.seek(file_pos)
-                                    remaining = f.read()
-                                    if remaining:
-                                        sys.stdout.write(remaining)
-                                        sys.stdout.flush()
-                            except OSError:
-                                pass
+                        _flush_log()
                         return
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             pass
