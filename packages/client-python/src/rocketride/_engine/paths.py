@@ -3,7 +3,7 @@ Filesystem paths for the ~/.rocketride directory structure.
 
 Layout:
     ~/.rocketride/
-        engines/{version}/rocketride-engine(.exe)
+        engines/{version}/engine(.exe)
         instances/state.db
         logs/{id}/stdout.log, stderr.log
 """
@@ -21,7 +21,7 @@ def engines_dir(version: str) -> Path:
 
 
 def engine_binary(version: str) -> Path:
-    name = 'rocketride-engine.exe' if sys.platform == 'win32' else 'rocketride-engine'
+    name = 'engine.exe' if sys.platform == 'win32' else 'engine'
     return engines_dir(version) / name
 
 

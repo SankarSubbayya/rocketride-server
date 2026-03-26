@@ -96,7 +96,14 @@ async def handle_engine_command(args) -> int:
         print(f'Unknown engine command: {cmd}')
         return 1
 
-    return await handler(args)
+    result = await handler(args)
+
+    # Show the table after every command except logs and list
+    if cmd not in ('logs', 'list'):
+        print()
+        await _cmd_list(args)
+
+    return result
 
 
 # ── Command handlers ──────────────────────────────────────────────
@@ -106,52 +113,91 @@ async def _cmd_list(args) -> int:
     async with StateDB() as db:
         instances = await db.get_all()
 
-    if not instances:
-        print('No engine instances registered.')
-        return 0
-
-    from .state import _is_pid_alive
+    from .state import _get_process_memory, _is_pid_alive
 
     # ── Brand palette (ANSI 24-bit) ──────────────────────────────
-    HORIZON = '\033[38;2;65;182;230m'  # #41b6e6 — borders, headers
+    HORIZON = '\033[38;2;65;182;230m'  # #41b6e6 — headers
     AMETHYST = '\033[38;2;95;33;103m'  # #5f2167 — title accent
     GREEN = '\033[38;2;80;220;100m'  # status: running
-    RED = '\033[38;2;220;80;80m'  # status: dead
+    RED = '\033[38;2;220;80;80m'  # status: stopped
     DIM = '\033[2m'
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
     # ── Column definitions ───────────────────────────────────────
     cols = [
-        ('id', 14),
+        ('version', 12),
+        ('id', 4),
         ('pid', 8),
         ('port', 7),
-        ('version', 12),
         ('owner', 6),
         ('status', 10),
-        ('started', 26),
+        ('restarted', 9),
+        ('uptime', 12),
+        ('memory', 10),
     ]
 
     # Build rows
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
     rows = []
     for inst in instances:
-        alive = _is_pid_alive(inst['pid'])
+        pid = inst['pid']
+        alive = _is_pid_alive(pid)
         status_text = 'running' if alive else 'stopped'
         status_color = GREEN if alive else RED
+
+        # Calculate uptime
+        if alive:
+            try:
+                started = datetime.fromisoformat(inst['started_at'])
+                delta = now - started
+                total_secs = int(delta.total_seconds())
+                if total_secs < 60:
+                    uptime = f'{total_secs}s'
+                elif total_secs < 3600:
+                    uptime = f'{total_secs // 60}m'
+                elif total_secs < 86400:
+                    uptime = f'{total_secs // 3600}h {(total_secs % 3600) // 60}m'
+                else:
+                    uptime = f'{total_secs // 86400}d {(total_secs % 86400) // 3600}h'
+            except Exception:
+                uptime = '-'
+        else:
+            uptime = '0s'
+
+        # Memory usage
+        mem_bytes = _get_process_memory(pid) if alive else None
+        if mem_bytes is not None:
+            if mem_bytes < 1024 * 1024:
+                memory = f'{mem_bytes / 1024:.0f} KB'
+            elif mem_bytes < 1024 * 1024 * 1024:
+                memory = f'{mem_bytes / (1024 * 1024):.1f} MB'
+            else:
+                memory = f'{mem_bytes / (1024 * 1024 * 1024):.1f} GB'
+        else:
+            memory = '-'
+
+        restart_count = inst.get('restart_count', 0)
+
         rows.append(
             {
-                'id': inst['id'],
-                'pid': str(inst['pid']),
-                'port': str(inst['port']),
                 'version': inst['version'],
+                'id': inst['id'],
+                'pid': str(pid) if pid else '-',
+                'port': str(inst['port']) if inst['port'] else '-',
                 'owner': inst['owner'],
                 'status': (status_color, status_text),
-                'started': inst['started_at'],
+                'restarted': str(restart_count),
+                'uptime': uptime,
+                'memory': memory,
             }
         )
 
     # ── Render table ─────────────────────────────────────────────
-    B = HORIZON  # border color
+    GRAY = '\033[38;2;100;100;100m'  # border color
+    B = GRAY
 
     # Build horizontal rules
     def h_rule(left, mid, right, fill='─'):
@@ -172,6 +218,11 @@ async def _cmd_list(args) -> int:
     print(f'{AMETHYST}{BOLD} RocketRide{RESET} {DIM}Engine instances{RESET}')
     print(top)
     print(header)
+
+    if not instances:
+        print(bot)
+        return 0
+
     print(sep)
 
     # Data rows
@@ -192,9 +243,7 @@ async def _cmd_list(args) -> int:
 
 
 async def _cmd_start(args) -> int:
-    import uuid
-
-    instance_id = getattr(args, 'id', None) or uuid.uuid4().hex[:12]
+    instance_id = getattr(args, 'id', None)
     version = getattr(args, 'version', None)
     explicit_port = getattr(args, 'port', None)
 
@@ -235,19 +284,30 @@ async def _cmd_start(args) -> int:
         return 1
 
     port = explicit_port or find_available_port()
-    print(f'Starting engine v{version} on port {port} (id: {instance_id})...')
-
-    pid = await spawn_engine(binary, port, instance_id)
 
     async with StateDB() as db:
-        await db.register(instance_id, pid, port, version, 'user')
+        if not instance_id:
+            instance_id = await db.next_id()
+
+        # Increment restart_count on every start after the first.
+        # Log files exist = instance was started before.
+        restart_count = 0
+        existing = await db.get(instance_id)
+        if existing:
+            prev_count = existing.get('restart_count', 0)
+            has_run_before = (logs_dir(instance_id) / 'stderr.log').exists()
+            restart_count = prev_count + 1 if has_run_before else 0
+
+        print(f'Starting engine v{version} on port {port} (id: {instance_id})...')
+        pid = await spawn_engine(binary, port, instance_id)
+        await db.register(instance_id, pid, port, version, 'cli', restart_count=restart_count)
 
     try:
-        await wait_healthy(port)
-        print(f'Engine running. PID: {pid}, Port: {port}, ID: {instance_id}')
+        log_file = logs_dir(instance_id) / 'stderr.log'
+        await wait_healthy(port, log_file=log_file)
         return 0
     except Exception as e:
-        print(f'Engine started but health check failed: {e}')
+        print(f'\nEngine started but health check failed: {e}')
         return 1
 
 
@@ -262,7 +322,14 @@ async def _cmd_stop(args) -> int:
 
         print(f'Stopping engine {instance_id} (PID: {inst["pid"]})...')
         await stop_engine(inst['pid'])
-        await db.unregister(instance_id)
+        await db.register(
+            instance_id,
+            0,
+            0,
+            inst['version'],
+            inst['owner'],
+            restart_count=inst.get('restart_count', 0),
+        )
 
     print('Stopped.')
     return 0
@@ -277,13 +344,16 @@ async def _cmd_install(args) -> int:
         version = await resolve_compatible_version(compat)
 
     binary = engine_binary(version)
-    if binary.exists():
-        print(f'Engine v{version} is already installed at {binary}')
-        return 0
+    if not binary.exists():
+        print(f'Downloading engine v{version}...')
+        await download_engine(version)
 
-    print(f'Downloading engine v{version}...')
-    path = await download_engine(version)
-    print(f'Installed engine v{version} at {path}')
+    # Register in state DB so it shows up in `list`
+    async with StateDB() as db:
+        instance_id = await db.next_id()
+        await db.register(instance_id, 0, 0, version, 'cli')
+
+    print(f'Installed engine v{version} (id: {instance_id})')
     return 0
 
 
@@ -292,22 +362,39 @@ async def _cmd_delete(args) -> int:
 
     async with StateDB() as db:
         inst = await db.get(instance_id)
-        if inst:
-            from .state import _is_pid_alive
-
-            if _is_pid_alive(inst['pid']):
-                print(f'Stopping running engine {instance_id}...')
-                await stop_engine(inst['pid'])
-            await db.unregister(instance_id)
-
-            # Remove the binary directory for this version
-            version_dir = engines_dir(inst['version'])
-            if version_dir.exists():
-                shutil.rmtree(str(version_dir))
-                print(f'Removed engine v{inst["version"]} from {version_dir}')
-        else:
+        if not inst:
             print(f'No instance found with id: {instance_id}')
             return 1
+
+        from .state import _is_pid_alive
+
+        pid = inst['pid']
+
+        # If the DB shows pid=0, the engine binary itself might still be
+        # running (e.g. started outside our tracking).  Scan for any
+        # process that was spawned from this version's binary.
+        if pid and _is_pid_alive(pid):
+            print(f'Stopping running engine {instance_id}...')
+            await stop_engine(pid)
+
+        await db.unregister(instance_id)
+
+    # Remove the binary directory for this version
+    version_dir = engines_dir(inst['version'])
+    if version_dir.exists():
+        # Retry removal — on Windows, file locks may take a moment to release
+        for attempt in range(3):
+            try:
+                shutil.rmtree(str(version_dir))
+                print(f'Removed engine v{inst["version"]} from {version_dir}')
+                break
+            except PermissionError:
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                else:
+                    print(f'Could not remove {version_dir} — files may be locked by a running process.')
+                    print('Kill the engine process first: taskkill /F /IM engine.exe')
+                    return 1
 
     # Remove logs
     log_dir = logs_dir(instance_id)
@@ -328,6 +415,16 @@ async def _cmd_logs(args) -> int:
 
     print(f'Tailing {log_file} (Ctrl+C to stop)\n')
 
+    # On Windows, asyncio.sleep doesn't get interrupted by Ctrl+C.
+    # Use a threading.Event to bridge the signal into the async loop.
+    import signal
+    import threading
+
+    stop = threading.Event()
+
+    original_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+
     try:
         with open(log_file, 'r') as f:
             # Print existing content
@@ -337,16 +434,18 @@ async def _cmd_logs(args) -> int:
                 sys.stdout.flush()
 
             # Tail new content
-            while True:
+            while not stop.is_set():
                 line = f.readline()
                 if line:
                     sys.stdout.write(line)
                     sys.stdout.flush()
                 else:
-                    await asyncio.sleep(0.2)
-    except KeyboardInterrupt:
-        print('\n')
-        return 0
+                    stop.wait(0.2)
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+
+    print()
+    return 0
 
 
 async def _cmd_run(args) -> int:
