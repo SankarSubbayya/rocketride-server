@@ -227,7 +227,15 @@ class DataConn(DAPConn):
         elif self._is_json_mime(mime_type) and 'questions' in listeners and self._target.taskConfig.get('questionField'):
             return 'questions'
 
-        # If this is text content and we have a text listener
+        # Plain text: both text and questions downstream → fan-out on one pipe (writeText + writeQuestions).
+        elif mime_type.startswith('text/') and 'text' in listeners and 'questions' in listeners:
+            return 'text_and_questions'
+
+        # Plain text: only questions lane → wrap as Question (smart webhook / chat text).
+        elif mime_type.startswith('text/') and 'questions' in listeners:
+            return 'questions'
+
+        # Plain text: only text lane
         elif mime_type.startswith('text/') and 'text' in listeners:
             return 'text'
 
@@ -607,6 +615,13 @@ class DataConn(DAPConn):
                     string_data = data.decode('utf-8')
                     pipe.writeText(string_data)
 
+                elif lane == 'text_and_questions':
+                    string_data = data.decode('utf-8')
+                    pipe.writeText(string_data)
+                    question = Question()
+                    question.addQuestion(string_data)
+                    pipe.writeQuestions(question)
+
                 elif lane == 'audio':
                     pipe.writeAudio(AVI_ACTION.WRITE, mime_type, data)
 
@@ -624,9 +639,14 @@ class DataConn(DAPConn):
 
                 elif lane == 'questions':
                     try:
-                        # Extraction for generic JSON; native Question MIME must use validate path
-                        # (application/rocketride-question* matches +json and would mis-route).
-                        if self._is_json_mime(mime_type) and not mime_type.startswith('application/rocketride-question'):
+                        if mime_type.startswith('text/'):
+                            # Plain text body → Question when questions lane is connected (getListeners).
+                            question = Question()
+                            question.addQuestion(data.decode('utf-8'))
+                            pipe.writeQuestions(question)
+                        elif self._is_json_mime(mime_type) and not mime_type.startswith('application/rocketride-question'):
+                            # Extraction for generic JSON; native Question MIME must use validate path
+                            # (application/rocketride-question* matches +json and would mis-route).
                             # Field-extraction mode: pull the configured field out of
                             # the JSON payload and wrap it in a Question object.
                             json_data = json.loads(data.decode('utf-8'))
