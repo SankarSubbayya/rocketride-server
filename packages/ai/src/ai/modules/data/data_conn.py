@@ -26,6 +26,7 @@ from typing import Dict, Any, TYPE_CHECKING
 from ai.constants import CONST_DATA_PIPE_TIMEOUT, CONST_DATA_SHUTDOWN_TIMEOUT
 from ai.common.dap import DAPConn
 from ai.common.schema import Question, Doc, Answer
+from ai.modules.data.webhook_text_routing import plain_text_lane_from_listener_names
 from rocketlib import IServiceEndpoint, IServiceFilterPipe, getObject, Entry, AVI_ACTION, monitorCompleted, monitorFailed
 
 # Only import for type checking to avoid circular import errors
@@ -227,17 +228,11 @@ class DataConn(DAPConn):
         elif self._is_json_mime(mime_type) and 'questions' in listeners and self._target.taskConfig.get('questionField'):
             return 'questions'
 
-        # Plain text: both text and questions downstream → fan-out on one pipe (writeText + writeQuestions).
-        elif mime_type.startswith('text/') and 'text' in listeners and 'questions' in listeners:
-            return 'text_and_questions'
-
-        # Plain text: only questions lane → wrap as Question (smart webhook / chat text).
-        elif mime_type.startswith('text/') and 'questions' in listeners:
-            return 'questions'
-
-        # Plain text: only text lane
-        elif mime_type.startswith('text/') and 'text' in listeners:
-            return 'text'
+        # Plain text: same routing as webhook IInstance.plain_text_lane_for_graph (hasListener).
+        elif mime_type.startswith('text/'):
+            lane = plain_text_lane_from_listener_names(listeners)
+            if lane is not None:
+                return lane
 
         # If this is image content and we have an image listener
         elif mime_type.startswith('image/') and 'image' in listeners:

@@ -21,8 +21,30 @@
 # SOFTWARE.
 # =============================================================================
 
+from typing import List, Optional
+
+from ai.modules.data.webhook_text_routing import plain_text_lane_from_listener_names
 from rocketlib import IInstanceBase
 
 
 class IInstance(IInstanceBase):
-    pass
+    """
+    Webhook source driver.
+
+    HTTP uploads are handled by the data stack (DataConn) using the same listener
+    graph as ``instance.hasListener(...)`` here. ``plain_text_lane_for_graph`` is
+    the architectural entry that mirrors product routing for ``text/*`` MIME.
+    """
+
+    def plain_text_lane_for_graph(self) -> Optional[str]:
+        """
+        Resolve internal lane for plain text using ``hasListener('text')`` and
+        ``hasListener('questions')``, matching DataConn (which uses
+        ``pipe.getListeners()`` for the same pipeline wiring).
+        """
+        listeners: List[str] = []
+        if self.instance.hasListener('questions'):
+            listeners.append('questions')
+        if self.instance.hasListener('text'):
+            listeners.append('text')
+        return plain_text_lane_from_listener_names(listeners)
