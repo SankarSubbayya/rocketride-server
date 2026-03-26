@@ -181,8 +181,9 @@ function makeStopTestServerAction() {
 function makeInstallDepsAction() {
 	return {
 		run: async (ctx, task) => {
-			const pyprojectPath = path.join(PACKAGE_DIR, 'pyproject.toml');
-			const { changed, hash } = await hasSourceChanged(pyprojectPath, DEPS_HASH_KEY);
+			const { changed, hash } = await hasSourceChanged(PACKAGE_DIR, DEPS_HASH_KEY, {
+				exclude: ['node_modules', '.git', '__pycache__', 'build', 'src', 'tests', 'scripts', 'LICENSE'],
+			});
 
 			if (!changed) {
 				task.output = 'Dependencies up to date';
