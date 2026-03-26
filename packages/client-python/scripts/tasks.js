@@ -85,9 +85,8 @@ function makeWheelSourceAction() {
 	};
 }
 
-// State keys for fingerprints
+// State key for source fingerprint
 const SRC_HASH_KEY = 'client-python.srcHash';
-const DEPS_HASH_KEY = 'client-python.depsHash';
 
 function makeWheelBuildAction() {
 	return {
@@ -178,26 +177,6 @@ function makeStopTestServerAction() {
 	};
 }
 
-function makeInstallDepsAction() {
-	return {
-		run: async (ctx, task) => {
-			const { changed, hash } = await hasSourceChanged(PACKAGE_DIR, DEPS_HASH_KEY, {
-				exclude: ['node_modules', '.git', '__pycache__', 'build', 'src', 'tests', 'scripts', 'LICENSE'],
-			});
-
-			if (!changed) {
-				task.output = 'Dependencies up to date';
-				return;
-			}
-
-			task.output = 'Installing client-python dependencies...';
-			await execCommand(ENGINE, ['-m', 'pip', 'install', '-e', PACKAGE_DIR, '--no-build-isolation', '--quiet'], { task, cwd: SERVER_DIR });
-
-			await saveSourceHash(DEPS_HASH_KEY, hash);
-		},
-	};
-}
-
 function makeRunPytestAction(options = {}) {
 	return {
 		run: async (ctx, task) => {
@@ -248,7 +227,6 @@ module.exports = {
 		{ name: 'client-python:sync', action: makeCopyToServerStaticAction },
 		{ name: 'client-python:start-server', action: makeStartTestServerAction },
 		{ name: 'client-python:stop-server', action: makeStopTestServerAction },
-		{ name: 'client-python:install-deps', action: makeInstallDepsAction },
 		{ name: 'client-python:run-pytest', action: makeRunPytestAction },
 
 		// Public actions (have descriptions)
@@ -265,7 +243,6 @@ module.exports = {
 				description: 'Test Python client',
 				steps: [
 					parallel(['nodes:build', 'ai:build', 'client-python:build'], 'Build dependencies'),
-					'client-python:install-deps',
 					bracket({
 						name: 'py-test-server',
 						setup: makeStartTestServerAction(),
@@ -285,7 +262,6 @@ module.exports = {
 					await removeMatching(PACKAGE_DIR, '.egg-info');
 					await removeMatching(path.join(PACKAGE_DIR, 'src'), '.egg-info');
 					await setState(SRC_HASH_KEY, null);
-					await setState(DEPS_HASH_KEY, null);
 					task.output = 'Cleaned client-python';
 				},
 			}),

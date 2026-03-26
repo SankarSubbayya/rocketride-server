@@ -110,15 +110,83 @@ async def _cmd_list(args) -> int:
         print('No engine instances registered.')
         return 0
 
-    # Header
-    print(f'{"ID":<14} {"PID":<8} {"PORT":<7} {"VERSION":<12} {"OWNER":<6} {"STATUS":<10} {"STARTED"}')
-    print('-' * 80)
-
     from .state import _is_pid_alive
 
+    # ── Brand palette (ANSI 24-bit) ──────────────────────────────
+    HORIZON = '\033[38;2;65;182;230m'  # #41b6e6 — borders, headers
+    AMETHYST = '\033[38;2;95;33;103m'  # #5f2167 — title accent
+    GREEN = '\033[38;2;80;220;100m'  # status: running
+    RED = '\033[38;2;220;80;80m'  # status: dead
+    DIM = '\033[2m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+
+    # ── Column definitions ───────────────────────────────────────
+    cols = [
+        ('id', 14),
+        ('pid', 8),
+        ('port', 7),
+        ('version', 12),
+        ('owner', 6),
+        ('status', 10),
+        ('started', 26),
+    ]
+
+    # Build rows
+    rows = []
     for inst in instances:
-        status = 'running' if _is_pid_alive(inst['pid']) else 'dead'
-        print(f'{inst["id"]:<14} {inst["pid"]:<8} {inst["port"]:<7} {inst["version"]:<12} {inst["owner"]:<6} {status:<10} {inst["started_at"]}')
+        alive = _is_pid_alive(inst['pid'])
+        status_text = 'running' if alive else 'stopped'
+        status_color = GREEN if alive else RED
+        rows.append(
+            {
+                'id': inst['id'],
+                'pid': str(inst['pid']),
+                'port': str(inst['port']),
+                'version': inst['version'],
+                'owner': inst['owner'],
+                'status': (status_color, status_text),
+                'started': inst['started_at'],
+            }
+        )
+
+    # ── Render table ─────────────────────────────────────────────
+    B = HORIZON  # border color
+
+    # Build horizontal rules
+    def h_rule(left, mid, right, fill='─'):
+        segments = [fill * (w + 2) for _, w in cols]
+        return f'{B}{left}{mid.join(segments)}{right}{RESET}'
+
+    top = h_rule('┌', '┬', '┐')
+    sep = h_rule('├', '┼', '┤')
+    bot = h_rule('└', '┴', '┘')
+
+    # Header row
+    header_cells = []
+    for name, w in cols:
+        header_cells.append(f' {BOLD}{HORIZON}{name.upper():<{w}}{RESET} ')
+    header = f'{B}│{RESET}{f"{B}│{RESET}".join(header_cells)}{B}│{RESET}'
+
+    # Title
+    print(f'{AMETHYST}{BOLD} RocketRide{RESET} {DIM}Engine instances{RESET}')
+    print(top)
+    print(header)
+    print(sep)
+
+    # Data rows
+    for row in rows:
+        cells = []
+        for name, w in cols:
+            val = row[name]
+            if isinstance(val, tuple):
+                color, text = val
+                cells.append(f' {color}{text:<{w}}{RESET} ')
+            else:
+                cells.append(f' {val:<{w}} ')
+        print(f'{B}│{RESET}{f"{B}│{RESET}".join(cells)}{B}│{RESET}')
+
+    print(bot)
 
     return 0
 
