@@ -11,7 +11,6 @@ Teardown only happens if we started the engine ourselves.
 
 import signal
 import sys
-import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -57,23 +56,36 @@ class EngineManager:
             # 1. Check for an existing live instance
             existing = await db.find_running()
             if existing:
-                self._port = existing['port']
-                self._instance_id = existing['id']
-                self._we_started = False
-                return (self.uri, False)
+                # Verify the engine is actually healthy (PID alive doesn't
+                # guarantee it's *our* engine — PIDs get recycled on Windows)
+                if await self._is_engine_healthy(existing['port']):
+                    self._port = existing['port']
+                    self._instance_id = existing['id']
+                    self._we_started = False
+                    return (self.uri, False)
+                # Engine port isn't responding — mark stale and spawn fresh
+                await stop_engine(existing['pid'])
+                await db.mark_stopped(existing['id'])
 
             # 2. Find or download a compatible binary
             binary = await self._resolve_binary()
 
             # 3. Spawn
             port = find_available_port()
-            instance_id = uuid.uuid4().hex[:12]
+            instance_id = await db.next_id()
 
             pid = await spawn_engine(binary, port, instance_id)
-            await db.register(instance_id, pid, port, self._version, 'sdk')
 
-        # Wait for the engine to be ready
-        await wait_healthy(port)
+            # 4. Wait for the engine to be healthy before registering
+            try:
+                await wait_healthy(port, pid=pid)
+            except Exception:
+                # Kill the orphaned process and register as stopped
+                await stop_engine(pid)
+                await db.register(instance_id, 0, 0, self._version, 'sdk')
+                raise
+
+            await db.register(instance_id, pid, port, self._version, 'sdk')
 
         self._port = port
         self._instance_id = instance_id
@@ -93,12 +105,27 @@ class EngineManager:
             inst = await db.get(self._instance_id)
             if inst:
                 await stop_engine(inst['pid'])
-                await db.unregister(self._instance_id)
+                await db.mark_stopped(self._instance_id)
 
         self._restore_signal_handlers()
         self._we_started = False
         self._instance_id = None
         self._port = None
+
+    @staticmethod
+    async def _is_engine_healthy(port: int) -> bool:
+        """Quick check whether the engine HTTP endpoint is responding."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'http://127.0.0.1:{port}',
+                    timeout=aiohttp.ClientTimeout(total=2),
+                ) as resp:
+                    return resp.status < 500
+        except (aiohttp.ClientError, OSError):
+            return False
 
     async def _resolve_binary(self) -> Path:
         """Find an installed compatible binary or download one."""
@@ -190,7 +217,7 @@ class EngineManager:
                         else:
                             os.kill(pid, signal.SIGTERM)
                     conn.execute(
-                        'DELETE FROM instances WHERE id = ?',
+                        'UPDATE instances SET pid = 0, port = 0 WHERE id = ?',
                         (self._instance_id,),
                     )
                     conn.commit()

@@ -159,6 +159,14 @@ class StateDB:
         await self._db.execute('DELETE FROM instances WHERE id = ?', (instance_id,))
         await self._db.commit()
 
+    async def mark_stopped(self, instance_id: str) -> None:
+        """Mark an instance as stopped by resetting pid and port to 0."""
+        await self._db.execute(
+            'UPDATE instances SET pid = 0, port = 0 WHERE id = ?',
+            (instance_id,),
+        )
+        await self._db.commit()
+
     async def get(self, instance_id: str) -> Optional[Dict[str, Any]]:
         """Get a single instance by id."""
         cursor = await self._db.execute('SELECT * FROM instances WHERE id = ?', (instance_id,))
@@ -193,6 +201,6 @@ class StateDB:
                 continue  # Installed but never started — skip
             if _is_pid_alive(inst['pid']):
                 return inst
-            # Clean up stale entry
-            await self.unregister(inst['id'])
+            # Mark stale entry as stopped (keep the row for ID tracking)
+            await self.mark_stopped(inst['id'])
         return None
