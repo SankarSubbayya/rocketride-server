@@ -374,6 +374,21 @@ async def _cmd_install(args) -> int:
 
     if version:
         version = normalize_version(version)
+
+        # Validate against the compatibility range
+        from .platform import _base_version
+
+        compat = get_compat_range()
+        try:
+            from packaging.specifiers import SpecifierSet
+            from packaging.version import Version
+
+            base = _base_version(version)
+            if Version(base) not in SpecifierSet(compat):
+                print(f'Engine v{version} is not compatible with this SDK (requires {compat})')
+                return 1
+        except Exception:
+            pass  # Non-PEP 440 versions (e.g. prereleases) skip validation
     else:
         print('Resolving latest compatible version...')
         compat = get_compat_range()
