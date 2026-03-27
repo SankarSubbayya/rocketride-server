@@ -175,9 +175,10 @@ class RocketRideClient(
             # Use the provided env dictionary
             self._env = dict(env)
 
-        # Engine auto-spawn: when no URI is provided and ROCKETRIDE_URI is not
-        # set, we'll auto-manage a local engine instance instead of defaulting
-        # to the cloud endpoint.
+        # Engine auto-spawn: when no explicit URI is provided, we prepare an
+        # EngineManager so __aenter__ can auto-spawn if needed.  If
+        # ROCKETRIDE_URI is set we'll try it first, but fall back to
+        # auto-spawn if it's unreachable.
         self._engine_manager = None  # type: Optional['EngineManager']
         self._engine_we_started = False
 
@@ -185,12 +186,11 @@ class RocketRideClient(
             env_uri = self._env.get('ROCKETRIDE_URI', '')
             if env_uri:
                 uri = env_uri
-            else:
-                # No URI anywhere — activate engine auto-spawn.
-                # The actual engine start happens in connect().
-                from ._engine.manager import EngineManager
+            # Always prepare auto-spawn as a fallback
+            from ._engine.manager import EngineManager
 
-                self._engine_manager = EngineManager()
+            self._engine_manager = EngineManager()
+            if not uri:
                 uri = ''  # Will be set during connect()
 
         if not auth:
@@ -230,17 +230,33 @@ class RocketRideClient(
         Enter async context manager - automatically connects to server.
 
         When no URI was provided, this will auto-spawn a local engine
-        instance before connecting.
+        instance before connecting.  If ROCKETRIDE_URI was set but is
+        unreachable, falls back to auto-spawn transparently.
 
         Returns:
             self: The connected client instance
         """
         if self._engine_manager:
-            uri, we_started = await self._engine_manager.ensure_running()
-            self._engine_we_started = we_started
-            from .mixins.connection import ConnectionMixin
+            # If a URI is already set (from ROCKETRIDE_URI env), verify it's
+            # reachable before using it — fall back to auto-spawn if not.
+            env_uri = self._env.get('ROCKETRIDE_URI', '')
+            if self._uri and env_uri:
+                if not await self._engine_manager._is_engine_healthy_uri(env_uri):
+                    import logging
 
-            self._uri = ConnectionMixin._get_websocket_uri(uri)
+                    logging.getLogger('rocketride').warning(
+                        'ROCKETRIDE_URI (%s) is unreachable — auto-spawning a local engine',
+                        env_uri,
+                    )
+                    self._uri = ''
+
+            # No reachable URI — auto-spawn
+            if not self._uri:
+                uri, we_started = await self._engine_manager.ensure_running()
+                self._engine_we_started = we_started
+                from .mixins.connection import ConnectionMixin
+
+                self._uri = ConnectionMixin._get_websocket_uri(uri)
         await self.connect()
         return self
 

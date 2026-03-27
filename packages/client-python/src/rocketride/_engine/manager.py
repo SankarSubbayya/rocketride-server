@@ -115,12 +115,21 @@ class EngineManager:
     @staticmethod
     async def _is_engine_healthy(port: int) -> bool:
         """Quick check whether the engine HTTP endpoint is responding."""
+        return await EngineManager._is_engine_healthy_uri(f'http://127.0.0.1:{port}')
+
+    @staticmethod
+    async def _is_engine_healthy_uri(uri: str) -> bool:
+        """Quick check whether an engine at *uri* is responding."""
         import aiohttp
+
+        # Normalize: ensure the URI has a scheme
+        if not uri.startswith(('http://', 'https://')):
+            uri = f'http://{uri}'
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f'http://127.0.0.1:{port}',
+                    uri,
                     timeout=aiohttp.ClientTimeout(total=2),
                 ) as resp:
                     return resp.status < 500
