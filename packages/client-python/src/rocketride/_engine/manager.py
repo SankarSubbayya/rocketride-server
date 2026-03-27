@@ -9,6 +9,7 @@ Implements the auto-spawn decision tree:
 Teardown only happens if we started the engine ourselves.
 """
 
+import logging
 import signal
 import sys
 from pathlib import Path
@@ -20,6 +21,9 @@ from .ports import find_available_port
 from .process import spawn_engine, stop_engine, wait_healthy
 from .resolver import get_compat_range, resolve_compatible_version
 from .state import StateDB
+
+
+logger = logging.getLogger('rocketride')
 
 
 class EngineManager:
@@ -71,6 +75,7 @@ class EngineManager:
             binary = await self._resolve_binary()
 
             # 3. Spawn
+            logger.info('Auto-spawning a local engine')
             port = find_available_port()
             existing_row = await db.find_by_version(self._version)
             instance_id = existing_row['id'] if existing_row else await db.next_id()
@@ -102,6 +107,7 @@ class EngineManager:
         if not self._we_started or not self._instance_id:
             return
 
+        logger.info('Tearing down local engine')
         async with StateDB() as db:
             inst = await db.get(self._instance_id)
             if inst:
@@ -170,6 +176,7 @@ class EngineManager:
         # Nothing installed — download the latest compatible
         version = await resolve_compatible_version(compat)
         self._version = version
+        logger.info('Downloading engine v%s...', version)
         return await download_engine(version)
 
     def _register_signal_handlers(self) -> None:

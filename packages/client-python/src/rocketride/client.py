@@ -245,7 +245,7 @@ class RocketRideClient(
                     import logging
 
                     logging.getLogger('rocketride').warning(
-                        'ROCKETRIDE_URI (%s) is unreachable — auto-spawning a local engine',
+                        'ROCKETRIDE_URI (%s) is unreachable',
                         env_uri,
                     )
                     self._uri = ''
