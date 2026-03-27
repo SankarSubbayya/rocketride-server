@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS instances (
 _MIGRATIONS = [
     # Add restart_count column for existing databases
     'ALTER TABLE instances ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0',
+    # Deduplicate engine instances by version
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_version ON instances (version)',
 ]
 
 
@@ -189,6 +191,12 @@ class StateDB:
             except (ValueError, TypeError):
                 pass
         return '0'
+
+    async def find_by_version(self, version: str) -> Optional[Dict[str, Any]]:
+        """Find an instance by version."""
+        cursor = await self._db.execute('SELECT * FROM instances WHERE version = ?', (version,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def find_running(self) -> Optional[Dict[str, Any]]:
         """Return the first registered instance whose pid is still alive.

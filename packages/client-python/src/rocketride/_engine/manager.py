@@ -72,7 +72,8 @@ class EngineManager:
 
             # 3. Spawn
             port = find_available_port()
-            instance_id = await db.next_id()
+            existing_row = await db.find_by_version(self._version)
+            instance_id = existing_row['id'] if existing_row else await db.next_id()
 
             pid = await spawn_engine(binary, port, instance_id)
 
