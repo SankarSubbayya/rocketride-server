@@ -49,7 +49,7 @@ def get_compat_range() -> str:
             pass
 
     # Hardcoded fallback matching pyproject.toml
-    return '>=1.0.0,<4.0.0'
+    return '>=3.0.0,<4.0.0'
 
 
 async def resolve_compatible_version(

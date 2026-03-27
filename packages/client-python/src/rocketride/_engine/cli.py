@@ -57,6 +57,7 @@ def _add_engine_subcommands(subparsers) -> None:
     # install
     install_p = subparsers.add_parser('install', help='Download an engine binary')
     install_p.add_argument('version', nargs='?', default=None, help='Version to install (default: latest compatible)')
+    install_p.add_argument('--force', action='store_true', help='Skip compatibility check and install any available version')
 
     # delete
     delete_p = subparsers.add_parser('delete', help='Stop and remove an engine instance')
@@ -315,12 +316,12 @@ async def _cmd_start(args) -> int:
 
         port = explicit_port or find_available_port()
 
-        # Increment restart_count on every start after the first.
-        # Log files exist = instance was started before.
+        # Track restarts: first start = 0, subsequent starts increment.
+        # Log files from a previous run prove the instance ran before.
         restart_count = 0
         if existing:
             prev_count = existing.get('restart_count', 0)
-            has_run_before = (logs_dir(instance_id) / 'stderr.log').exists()
+            has_run_before = prev_count > 0 or (logs_dir(instance_id) / 'stdout.log').exists()
             restart_count = prev_count + 1 if has_run_before else 0
 
         print(f'Starting engine v{version} on port {port} (id: {instance_id})...')
@@ -371,24 +372,35 @@ async def _cmd_install(args) -> int:
     from .platform import normalize_version
 
     version = getattr(args, 'version', None)
+    force = getattr(args, 'force', False)
 
     if version:
         version = normalize_version(version)
 
-        # Validate against the compatibility range
-        from .platform import _base_version
+        # Check if already installed
+        binary = engine_binary(version)
+        async with StateDB() as db:
+            existing = await db.find_by_version(version)
+        if binary.exists() and existing:
+            print(f'Engine v{version} is already installed (id: {existing["id"]})')
+            return 0
 
-        compat = get_compat_range()
-        try:
-            from packaging.specifiers import SpecifierSet
-            from packaging.version import Version
+        # Validate against the compatibility range (unless --force)
+        if not force:
+            from .platform import _base_version
 
-            base = _base_version(version)
-            if Version(base) not in SpecifierSet(compat):
-                print(f'Engine v{version} is not compatible with this SDK (requires {compat})')
-                return 1
-        except Exception:
-            pass  # Non-PEP 440 versions (e.g. prereleases) skip validation
+            compat = get_compat_range()
+            try:
+                from packaging.specifiers import SpecifierSet
+                from packaging.version import Version
+
+                base = _base_version(version)
+                if Version(base) not in SpecifierSet(compat):
+                    print(f'Engine v{version} is not compatible with this SDK (requires {compat})')
+                    print('Use --force to install anyway.')
+                    return 1
+            except Exception:
+                pass  # Non-PEP 440 versions (e.g. prereleases) skip validation
     else:
         print('Resolving latest compatible version...')
         compat = get_compat_range()
@@ -401,7 +413,8 @@ async def _cmd_install(args) -> int:
 
     # Register in state DB so it shows up in `list`
     async with StateDB() as db:
-        instance_id = await db.next_id()
+        existing = await db.find_by_version(version)
+        instance_id = existing['id'] if existing else await db.next_id()
         await db.register(instance_id, 0, 0, version, 'cli')
 
     print(f'Installed engine v{version} (id: {instance_id})')
@@ -417,40 +430,53 @@ async def _cmd_delete(args) -> int:
             print(f'No instance found with id: {instance_id}')
             return 1
 
-        from .state import _is_pid_alive
+    from .state import _is_pid_alive
 
-        pid = inst['pid']
+    pid = inst['pid']
+    version = inst['version']
 
-        # If the DB shows pid=0, the engine binary itself might still be
-        # running (e.g. started outside our tracking).  Scan for any
-        # process that was spawned from this version's binary.
-        if pid and _is_pid_alive(pid):
-            print(f'Stopping running engine {instance_id}...')
-            await stop_engine(pid)
+    # 1. Stop the process if running
+    if pid and _is_pid_alive(pid):
+        print(f'Stopping running engine {instance_id}...')
+        await stop_engine(pid)
 
-        await db.unregister(instance_id)
+    # 2. Check if any OTHER instance is running from the same version's binary
+    async with StateDB() as db:
+        all_instances = await db.get_all()
+    version_in_use = False
+    for other in all_instances:
+        if other['id'] == instance_id:
+            continue
+        if other['version'] == version and other['pid'] and _is_pid_alive(other['pid']):
+            version_in_use = True
+            break
 
-    # Remove the binary directory for this version
-    version_dir = engines_dir(inst['version'])
-    if version_dir.exists():
-        # Retry removal — on Windows, file locks may take a moment to release
-        for attempt in range(3):
+    # 3. Remove the binary directory (only if no other instance uses it)
+    version_dir = engines_dir(version)
+    if version_in_use:
+        print(f'Keeping engine v{version} binary (still in use by another instance).')
+    elif version_dir.exists():
+        for attempt in range(5):
             try:
                 shutil.rmtree(str(version_dir))
-                print(f'Removed engine v{inst["version"]} from {version_dir}')
+                print(f'Removed engine v{version} from {version_dir}')
                 break
             except PermissionError:
-                if attempt < 2:
+                if attempt < 4:
                     await asyncio.sleep(1)
                 else:
-                    print(f'Could not remove {version_dir} — files may be locked by a running process.')
-                    print('Kill the engine process first: taskkill /F /IM engine.exe')
+                    print(f'Could not remove {version_dir} — files may still be locked.')
+                    print('The instance record has NOT been removed. Try again shortly.')
                     return 1
 
-    # Remove logs
+    # 4. Remove logs
     log_dir = logs_dir(instance_id)
     if log_dir.exists():
         shutil.rmtree(str(log_dir))
+
+    # 5. Only remove the DB row after everything else succeeded
+    async with StateDB() as db:
+        await db.unregister(instance_id)
 
     print(f'Deleted instance {instance_id}.')
     return 0

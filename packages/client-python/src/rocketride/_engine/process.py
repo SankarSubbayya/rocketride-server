@@ -76,17 +76,28 @@ async def stop_engine(pid: int, timeout: float = 10.0) -> None:
     import signal
 
     if sys.platform == 'win32':
-        import ctypes
+        # Kill the entire process tree so child processes don't hold file locks
+        try:
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            # Fallback: kill just the parent process
+            import ctypes
 
-        kernel32 = ctypes.windll.kernel32
-        PROCESS_TERMINATE = 0x0001
-        SYNCHRONIZE = 0x00100000
-        handle = kernel32.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, pid)
-        if handle:
-            kernel32.TerminateProcess(handle, 1)
-            # Wait for the process to fully exit so file locks are released
-            kernel32.WaitForSingleObject(handle, int(timeout * 1000))
-            kernel32.CloseHandle(handle)
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_TERMINATE = 0x0001
+            SYNCHRONIZE = 0x00100000
+            handle = kernel32.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, pid)
+            if handle:
+                kernel32.TerminateProcess(handle, 1)
+                kernel32.WaitForSingleObject(handle, int(timeout * 1000))
+                kernel32.CloseHandle(handle)
+        # Give Windows a moment to release file handles
+        await asyncio.sleep(0.5)
         return
 
     # Unix: SIGTERM then SIGKILL

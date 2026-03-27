@@ -75,7 +75,7 @@ Repository = "https://github.com/rocketride-ai/rocketride-server.git"
 rocketride = "rocketride.cli.main:main"
 
 [tool.rocketride]
-engine-compatible = ">=1.0.0,<4.0.0"
+engine-compatible = ">=3.0.0,<4.0.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]
