@@ -116,14 +116,22 @@ async def _cmd_list(args) -> int:
 
     from .state import _get_process_memory, _is_pid_alive
 
+    # ── TTY detection ─────────────────────────────────────────────
+    import sys
+
+    use_color = sys.stdout.isatty()
+
     # ── Brand palette (ANSI 24-bit) ──────────────────────────────
-    HORIZON = '\033[38;2;65;182;230m'  # #41b6e6 — headers
-    AMETHYST = '\033[38;2;95;33;103m'  # #5f2167 — title accent
-    GREEN = '\033[38;2;80;220;100m'  # status: running
-    RED = '\033[38;2;220;80;80m'  # status: stopped
-    DIM = '\033[2m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
+    if use_color:
+        HORIZON = '\033[38;2;65;182;230m'  # #41b6e6 — headers
+        AMETHYST = '\033[38;2;95;33;103m'  # #5f2167 — title accent
+        GREEN = '\033[38;2;80;220;100m'  # status: running
+        RED = '\033[38;2;220;80;80m'  # status: stopped
+        DIM = '\033[2m'
+        BOLD = '\033[1m'
+        RESET = '\033[0m'
+    else:
+        HORIZON = AMETHYST = GREEN = RED = DIM = BOLD = RESET = ''
 
     # ── Column definitions (minimum widths) ────────────────────────
     col_names = ['version', 'id', 'pid', 'port', 'owner', 'status', 'restarted', 'uptime', 'memory']
@@ -208,48 +216,64 @@ async def _cmd_list(args) -> int:
     cols = [(name, col_widths[name]) for name in col_names]
 
     # ── Render table ─────────────────────────────────────────────
-    GRAY = '\033[38;2;100;100;100m'  # border color
-    B = GRAY
+    if use_color:
+        GRAY = '\033[38;2;100;100;100m'  # border color
+        B = GRAY
 
-    # Build horizontal rules
-    def h_rule(left, mid, right, fill='─'):
-        segments = [fill * (w + 2) for _, w in cols]
-        return f'{B}{left}{mid.join(segments)}{right}{RESET}'
+        # Build horizontal rules
+        def h_rule(left, mid, right, fill='─'):
+            segments = [fill * (w + 2) for _, w in cols]
+            return f'{B}{left}{mid.join(segments)}{right}{RESET}'
 
-    top = h_rule('┌', '┬', '┐')
-    sep = h_rule('├', '┼', '┤')
-    bot = h_rule('└', '┴', '┘')
+        top = h_rule('┌', '┬', '┐')
+        sep = h_rule('├', '┼', '┤')
+        bot = h_rule('└', '┴', '┘')
 
-    # Header row
-    header_cells = []
-    for name, w in cols:
-        header_cells.append(f' {BOLD}{HORIZON}{name.upper():<{w}}{RESET} ')
-    header = f'{B}│{RESET}{f"{B}│{RESET}".join(header_cells)}{B}│{RESET}'
-
-    # Title
-    print(f'{AMETHYST}{BOLD} RocketRide{RESET} {DIM}Engine instances{RESET}')
-    print(top)
-    print(header)
-
-    if not instances:
-        print(bot)
-        return 0
-
-    print(sep)
-
-    # Data rows
-    for row in rows:
-        cells = []
+        # Header row
+        header_cells = []
         for name, w in cols:
-            val = row[name]
-            if isinstance(val, tuple):
-                color, text = val
-                cells.append(f' {color}{text:<{w}}{RESET} ')
-            else:
-                cells.append(f' {val:<{w}} ')
-        print(f'{B}│{RESET}{f"{B}│{RESET}".join(cells)}{B}│{RESET}')
+            header_cells.append(f' {BOLD}{HORIZON}{name.upper():<{w}}{RESET} ')
+        header = f'{B}│{RESET}{f"{B}│{RESET}".join(header_cells)}{B}│{RESET}'
 
-    print(bot)
+        # Title
+        print(f'{AMETHYST}{BOLD} RocketRide{RESET} {DIM}Engine instances{RESET}')
+        print(top)
+        print(header)
+
+        if not instances:
+            print(bot)
+            return 0
+
+        print(sep)
+
+        # Data rows
+        for row in rows:
+            cells = []
+            for name, w in cols:
+                val = row[name]
+                if isinstance(val, tuple):
+                    color, text = val
+                    cells.append(f' {color}{text:<{w}}{RESET} ')
+                else:
+                    cells.append(f' {val:<{w}} ')
+            print(f'{B}│{RESET}{f"{B}│{RESET}".join(cells)}{B}│{RESET}')
+
+        print(bot)
+    else:
+        # Plain text table for non-TTY (piped) output
+        header_parts = [f'{name.upper():<{w}}' for name, w in cols]
+        print('  '.join(header_parts))
+
+        if not instances:
+            return 0
+
+        for row in rows:
+            parts = []
+            for name, w in cols:
+                val = row[name]
+                text = val[1] if isinstance(val, tuple) else val
+                parts.append(f'{text:<{w}}')
+            print('  '.join(parts))
 
     return 0
 
