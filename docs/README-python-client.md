@@ -1,6 +1,17 @@
-# RocketRide
+<p align="center">
+  <img src="packages/client-python/assets/banner.svg" alt="RocketRide Python SDK" width="900">
+</p>
 
-Python SDK for the RocketRide Engine - build, run, and manage AI pipelines from Python.
+<p align="center">
+  Build, run, and manage AI pipelines from Python.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/rocketride/"><img src="https://img.shields.io/pypi/v/rocketride?color=41b6e6&label=pypi" alt="PyPI"></a>
+  <a href="https://github.com/rocketride-org/rocketride-server/blob/develop/LICENSE"><img src="https://img.shields.io/badge/license-MIT-5f2167" alt="MIT License"></a>
+  <a href="https://github.com/rocketride-org/rocketride-server"><img src="https://img.shields.io/github/stars/rocketride-org/rocketride-server?style=flat&color=1e1a34&label=GitHub&logo=github&logoColor=white" alt="GitHub"></a>
+  <a href="https://discord.gg/9hr3tdZmEG"><img src="https://img.shields.io/badge/Discord-Join-370b7a?logo=discord&logoColor=white" alt="Discord"></a>
+</p>
 
 ## Quick Start
 
@@ -55,6 +66,168 @@ You build your `.pipe` - and you run it against the fastest AI runtime available
 - **Async context manager** - `async with RocketRideClient(...) as client:` for automatic cleanup
 - **Bundled engine** - Zero-config local execution: the SDK auto-downloads, spawns, and manages the engine binary
 - **Engine CLI** - `rocketride engine` (or `rocketride e`) commands for engine lifecycle management
+
+---
+
+## CLI Reference
+
+The `rocketride` command-line interface provides two categories of commands: **pipeline/task management** (for running and monitoring pipelines) and **engine management** (for controlling local engine instances).
+
+### Pipeline & Task Commands
+
+#### `rocketride start <pipeline>`
+
+Start a new pipeline execution.
+
+```bash
+rocketride start ./pipeline.pipe
+rocketride start ./pipeline.pipe --uri http://localhost:5566 --apikey YOUR_KEY
+rocketride start ./pipeline.pipe --threads 4 --args key1=value1 key2=value2
+```
+
+| Flag        | Description                                           |
+| ----------- | ----------------------------------------------------- |
+| `--uri`     | Engine URI (default: `$ROCKETRIDE_URI` or auto-spawn) |
+| `--apikey`  | API key (default: `$ROCKETRIDE_APIKEY`)               |
+| `--token`   | Reuse an existing task token                          |
+| `--threads` | Number of threads for the pipeline                    |
+| `--args`    | Key-value arguments passed to the pipeline            |
+
+#### `rocketride upload <files> [--pipeline_path <path>]`
+
+Upload files to an existing or new pipeline.
+
+```bash
+rocketride upload ./data/*.csv --pipeline_path ./pipeline.pipe
+rocketride upload report.pdf --token TASK_TOKEN --uri http://localhost:5566
+```
+
+| Flag              | Description                                |
+| ----------------- | ------------------------------------------ |
+| `--pipeline_path` | Pipeline to start if no `--token` is given |
+| `--token`         | Upload to an existing task                 |
+| `--uri`           | Engine URI                                 |
+| `--apikey`        | API key                                    |
+| `--threads`       | Number of threads                          |
+| `--args`          | Key-value arguments                        |
+
+#### `rocketride status`
+
+Monitor task execution status continuously.
+
+```bash
+rocketride status --token TASK_TOKEN --uri http://localhost:5566
+```
+
+#### `rocketride stop`
+
+Terminate a running task.
+
+```bash
+rocketride stop --token TASK_TOKEN --uri http://localhost:5566
+```
+
+#### `rocketride events [event_types...]`
+
+Monitor task events with optional filtering.
+
+```bash
+rocketride events --token TASK_TOKEN
+rocketride events apaevt_status_upload apaevt_status_processing --token TASK_TOKEN
+rocketride events --log --token TASK_TOKEN
+```
+
+#### `rocketride list`
+
+List all active tasks on the engine.
+
+```bash
+rocketride list --uri http://localhost:5566
+rocketride list --json
+```
+
+### Engine Management
+
+The engine commands manage local RocketRide engine instances. The SDK can automatically download, install, and run the engine binary &mdash; no separate install needed.
+
+Use `rocketride engine <command>` (or the shorthand `rocketride e <command>`).
+
+#### `rocketride engine install [version]`
+
+Download and register an engine binary.
+
+```bash
+rocketride engine install              # latest compatible version
+rocketride engine install 3.0.5        # specific version
+rocketride engine install 3.0.5 --force  # skip compatibility check
+```
+
+#### `rocketride engine list`
+
+List all tracked engine instances with status, port, PID, memory, and uptime.
+
+```bash
+rocketride engine list
+```
+
+```
+VERSION  ID  PID    PORT  OWNER  STATUS  RESTARTED  UPTIME  MEMORY
+3.0.5    0   12340  5566  cli    online  2          4m      86.9 MB
+3.0.3    1   -      -     cli    stopped 0          0s      -
+```
+
+#### `rocketride engine start [id]`
+
+Start an engine instance.
+
+```bash
+rocketride engine start 0                         # by instance ID
+rocketride engine start --version 3.0.5            # by version
+rocketride engine start --version 3.0.5 --port 7777  # explicit port
+```
+
+| Flag        | Description                                                               |
+| ----------- | ------------------------------------------------------------------------- |
+| `--version` | Engine version to use (looks up the registered instance for that version) |
+| `--port`    | Explicit port (default: auto-assigned)                                    |
+
+#### `rocketride engine stop <id>`
+
+Stop a running engine instance.
+
+```bash
+rocketride engine stop 0
+```
+
+#### `rocketride engine delete <id>`
+
+Deregister an engine instance. The engine binary is kept on disk so `install` can re-register it without re-downloading.
+
+```bash
+rocketride engine delete 0            # deregister only
+rocketride engine delete 0 --purge    # also remove the binary from disk
+```
+
+| Flag      | Description                             |
+| --------- | --------------------------------------- |
+| `--purge` | Also remove the engine binary from disk |
+
+#### `rocketride engine logs <id>`
+
+Tail the log output of an engine instance.
+
+```bash
+rocketride engine logs 0
+```
+
+#### `rocketride engine run <pipeline>`
+
+Run a pipeline with an auto-managed engine. The engine is started before execution and stopped afterward.
+
+```bash
+rocketride engine run ./pipeline.pipe --apikey YOUR_KEY
+rocketride engine run ./pipeline.pipe --engine 0    # use a specific instance
+```
 
 ---
 
@@ -366,53 +539,6 @@ async def main():
         await client.terminate(token)
 
 asyncio.run(main())
-```
-
----
-
-## Engine CLI
-
-The SDK includes CLI commands for managing engine instances. All commands are available under `rocketride engine` (or the shorthand `rocketride e`).
-
-```bash
-pip install rocketride
-```
-
-### Commands
-
-| Command                              | Description                                                                       |
-| ------------------------------------ | --------------------------------------------------------------------------------- |
-| `rocketride engine list`             | List all tracked engine instances and their status (running/dead).                |
-| `rocketride engine start`            | Start a new engine instance. Downloads a compatible binary if none is installed.  |
-| `rocketride engine stop <id>`        | Stop a running engine instance by its ID.                                         |
-| `rocketride engine install`          | Download and install the latest compatible engine binary without starting it.     |
-| `rocketride engine delete <version>` | Delete an installed engine version from disk.                                     |
-| `rocketride engine logs <id>`        | Tail the stdout log of a running engine instance (live, Ctrl+C to stop).          |
-| `rocketride engine run <pipeline>`   | Start an engine, execute a pipeline file, and shut down. Useful for one-off runs. |
-
-### Examples
-
-```bash
-# List all engine instances
-rocketride engine list
-
-# Start a local engine
-rocketride engine start
-
-# Use the shorthand
-rocketride e list
-
-# Stop an instance
-rocketride engine stop abc123def456
-
-# Install the engine binary without starting
-rocketride engine install
-
-# Delete an old engine version
-rocketride engine delete 3.0.0
-
-# Run a pipeline file (auto-starts and stops the engine)
-rocketride engine run my_pipeline.pipe
 ```
 
 ---
