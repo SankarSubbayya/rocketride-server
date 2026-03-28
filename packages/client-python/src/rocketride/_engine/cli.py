@@ -8,7 +8,7 @@ Commands:
     start [id]              Start an engine instance
     stop [id]               Stop a running engine instance
     install [version]       Download an engine binary
-    delete [id]             Stop and remove an engine instance + binary
+    delete [id]             Stop and deregister an engine instance (--purge to remove binary)
     logs [id]               Tail engine log output
     run <pipeline> [--engine id]  Run a pipeline with auto-managed engine
 """
@@ -62,6 +62,7 @@ def _add_engine_subcommands(subparsers) -> None:
     # delete
     delete_p = subparsers.add_parser('delete', help='Stop and remove an engine instance')
     delete_p.add_argument('id', help='Instance id to delete')
+    delete_p.add_argument('--purge', action='store_true', help='Also remove the engine binary from disk')
 
     # logs
     logs_p = subparsers.add_parser('logs', help='Tail engine log output')
@@ -289,7 +290,15 @@ async def _cmd_start(args) -> int:
         version = normalize_version(version)
 
     async with StateDB() as db:
-        if not instance_id:
+        if not instance_id and version:
+            existing = await db.find_by_version(version)
+            if existing:
+                instance_id = existing['id']
+            else:
+                print(f'No instance found for version {version}.')
+                print('Use "rocketride engine install" to create one first.')
+                return 1
+        elif not instance_id:
             instance_id = await db.next_id()
 
         # If an ID was explicitly provided, it must already exist in the DB
@@ -475,23 +484,25 @@ async def _cmd_delete(args) -> int:
             version_in_use = True
             break
 
-    # 3. Remove the binary directory (only if no other instance uses it)
+    # 3. Remove the binary directory (only when --purge is set)
+    purge = getattr(args, 'purge', False)
     version_dir = engines_dir(version)
-    if version_in_use:
-        print(f'Keeping engine v{version} binary (still in use by another instance).')
-    elif version_dir.exists():
-        for attempt in range(5):
-            try:
-                shutil.rmtree(str(version_dir))
-                print(f'Removed engine v{version} from {version_dir}')
-                break
-            except PermissionError:
-                if attempt < 4:
-                    await asyncio.sleep(1)
-                else:
-                    print(f'Could not remove {version_dir} — files may still be locked.')
-                    print('The instance record has NOT been removed. Try again shortly.')
-                    return 1
+    if purge:
+        if version_in_use:
+            print(f'Keeping engine v{version} binary (still in use by another instance).')
+        elif version_dir.exists():
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(str(version_dir))
+                    print(f'Removed engine v{version} from {version_dir}')
+                    break
+                except PermissionError:
+                    if attempt < 4:
+                        await asyncio.sleep(1)
+                    else:
+                        print(f'Could not remove {version_dir} — files may still be locked.')
+                        print('The instance record has NOT been removed. Try again shortly.')
+                        return 1
 
     # 4. Remove logs
     log_dir = logs_dir(instance_id)
