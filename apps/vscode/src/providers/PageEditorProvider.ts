@@ -37,11 +37,12 @@
  */
 
 import * as vscode from 'vscode';
-import { TaskStatus, GenericEvent, GenericResponse } from '../shared/types';
+import { TaskStatus, GenericEvent, GenericResponse, ConnectionState } from '../shared/types';
 import { ConnectionManager } from '../connection/connection';
 import { ConfigManager } from '../config';
 import { getLogger } from '../shared/util/output';
 import { icons } from '../shared/util/icons';
+import { PipelineFileParser } from '../shared/util/pipelineParser';
 
 /**
  * Interface for tracking editor state per document
@@ -101,12 +102,14 @@ export class PageEditorProvider implements vscode.CustomTextEditorProvider {
 		// Listen for connection state changes to start monitoring when connected
 		const connectionStateListener = this.connectionManager.on('connectionStateChanged', async (connectionStatus) => {
 			try {
-				if (connectionStatus.state === 2) {
-					// ConnectionState.CONNECTED
+				if (connectionStatus.state === ConnectionState.CONNECTED) {
 					await this.startMonitoringForAllEditors();
 				} else {
 					await this.stopMonitoringForAllEditors();
 				}
+
+				// Broadcast connection state to all open editor webviews
+				this.broadcastConnectionState(this.connectionManager.isConnected());
 			} catch (error) {
 				this.logger.error(`Handling connection state change: ${error}`);
 			}
@@ -136,6 +139,19 @@ export class PageEditorProvider implements vscode.CustomTextEditorProvider {
 					.then(undefined, (err: unknown) => {
 						this.logger.error(`Failed to post servicesUpdate to webview: ${err}`);
 					});
+			}
+		}
+	}
+
+	/**
+	 * Broadcasts connection state to all open page editor webviews.
+	 */
+	private broadcastConnectionState(isConnected: boolean): void {
+		for (const editorState of this.editorStates.values()) {
+			if (editorState.isReady && !editorState.isDisposed && editorState.webviewPanel.webview) {
+				editorState.webviewPanel.webview.postMessage({ type: 'connectionState', isConnected }).then(undefined, (err: unknown) => {
+					this.logger.error(`Failed to post connectionState to webview: ${err}`);
+				});
 			}
 		}
 	}
@@ -432,6 +448,11 @@ export class PageEditorProvider implements vscode.CustomTextEditorProvider {
 						}
 					}
 
+					// Send initial connection state
+					webview.postMessage({ type: 'connectionState', isConnected: this.connectionManager.isConnected() }).then(undefined, (err: unknown) => {
+						this.logger.error(`Failed to post connectionState to webview: ${err}`);
+					});
+
 					// Now start monitoring for future updates (if not already monitoring)
 					if (!editorState.isMonitoring) {
 						try {
@@ -597,9 +618,18 @@ export class PageEditorProvider implements vscode.CustomTextEditorProvider {
 	 * @param document The document with current content
 	 */
 	private updateWebview(webview: vscode.Webview, document: vscode.TextDocument): void {
+		const text = document.getText();
+		const parsed = PipelineFileParser.parseContent(text, document.uri.fsPath);
+		if (!parsed.isValid) {
+			webview.postMessage({
+				type: 'fileInvalid',
+				errors: parsed.errors,
+			});
+			return;
+		}
 		webview.postMessage({
 			type: 'update',
-			content: document.getText(),
+			content: text,
 		});
 	}
 

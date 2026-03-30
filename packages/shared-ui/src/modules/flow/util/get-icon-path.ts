@@ -63,6 +63,7 @@ import mistralVisionIcon from '../../../assets/nodes/mistral-vision.svg';
 import mistralIcon from '../../../assets/nodes/mistral.svg';
 import mongoDBIcon from '../../../assets/nodes/mongodb.svg';
 import mysqlIcon from '../../../assets/nodes/mysql.svg';
+import neo4jIcon from '../../../assets/nodes/neo4j.svg';
 import objstoreIcon from '../../../assets/nodes/objstore.svg';
 import ocrIcon from '../../../assets/nodes/ocr.svg';
 import ollamaIcon from '../../../assets/nodes/ollama.svg';
@@ -101,6 +102,9 @@ import httpIcon from '../../../assets/nodes/http.svg';
 import mcpIcon from '../../../assets/nodes/mcp.svg';
 import memoryIcon from '../../../assets/nodes/memory.svg';
 import xaiIcon from '../../../assets/nodes/xai.svg';
+import accessibilityDescribeIcon from '../../../assets/nodes/accessibility-describe.svg';
+import deepagentIcon from '../../../assets/nodes/deepagent.svg';
+import twelvelabsIcon from '../../../assets/nodes/twelvelabs.svg';
 
 /**
  * Static lookup table mapping icon names (without file extensions) to their
@@ -150,6 +154,7 @@ const iconMap: Record<string, string> = {
 	mistral: mistralIcon,
 	mongodb: mongoDBIcon,
 	mysql: mysqlIcon,
+	neo4j: neo4jIcon,
 	objstore: objstoreIcon,
 	ocr: ocrIcon,
 	ollama: ollamaIcon,
@@ -184,6 +189,9 @@ const iconMap: Record<string, string> = {
 	weaviate: weaviateIcon,
 	webhook: webhookIcon,
 	xai: xaiIcon,
+	'accessibility-describe': accessibilityDescribeIcon,
+	deepagent: deepagentIcon,
+	twelvelabs: twelvelabsIcon,
 };
 
 /**
