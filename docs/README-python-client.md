@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packages/client-python/assets/banner.svg" alt="RocketRide Python SDK" width="900">
+  <img src="https://raw.githubusercontent.com/rocketride-org/rocketride-server/main/images/banner-python.png" alt="RocketRide Python SDK" width="900">
 </p>
 
 <p align="center">
