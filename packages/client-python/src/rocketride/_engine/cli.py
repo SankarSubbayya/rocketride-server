@@ -10,12 +10,15 @@ Commands:
     install [version]       Download an engine binary
     delete [id]             Stop and deregister an engine instance (--purge to remove binary)
     logs [id]               Tail engine log output
+    reconcile               Restart engines that should be running but crashed
+    autostart               Manage OS startup hook for engine reconcile
     run <pipeline> [--engine id]  Run a pipeline with auto-managed engine
 """
 
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 
 from .downloader import download_engine
@@ -68,6 +71,16 @@ def _add_engine_subcommands(subparsers) -> None:
     logs_p = subparsers.add_parser('logs', help='Tail engine log output')
     logs_p.add_argument('id', help='Instance id')
 
+    # reconcile
+    subparsers.add_parser('reconcile', help='Restart engines that should be running but crashed')
+
+    # autostart
+    autostart_p = subparsers.add_parser('autostart', help='Manage OS startup hook for engine reconcile')
+    autostart_group = autostart_p.add_mutually_exclusive_group()
+    autostart_group.add_argument('--enable', action='store_true', help='Register OS startup hook')
+    autostart_group.add_argument('--disable', action='store_true', help='Remove OS startup hook')
+    autostart_group.add_argument('--status', action='store_true', default=True, help='Show whether autostart is enabled')
+
     # run
     run_p = subparsers.add_parser('run', help='Run a pipeline with auto-managed engine')
     run_p.add_argument('pipeline', help='Path to pipeline JSON file')
@@ -80,7 +93,7 @@ async def handle_engine_command(args) -> int:
     cmd = getattr(args, 'engine_command', None)
     if not cmd:
         print('Usage: rocketride engine <command>')
-        print('Commands: list, start, stop, install, delete, logs, run')
+        print('Commands: list, start, stop, install, delete, logs, reconcile, autostart, run')
         return 1
 
     handlers = {
@@ -90,6 +103,8 @@ async def handle_engine_command(args) -> int:
         'install': _cmd_install,
         'delete': _cmd_delete,
         'logs': _cmd_logs,
+        'reconcile': _cmd_reconcile,
+        'autostart': _cmd_autostart,
         'run': _cmd_run,
     }
 
@@ -365,7 +380,7 @@ async def _cmd_start(args) -> int:
         await wait_healthy(port, pid=pid, log_file=log_file)
         # Only persist pid/port once the engine is confirmed healthy
         async with StateDB() as db:
-            await db.register(instance_id, pid, port, version, 'cli', restart_count=restart_count)
+            await db.register(instance_id, pid, port, version, 'cli', restart_count=restart_count, desired_state='running')
         return 0
     except Exception as e:
         print(f'\nEngine started but health check failed: {e}')
@@ -395,6 +410,7 @@ async def _cmd_stop(args) -> int:
             inst['version'],
             inst['owner'],
             restart_count=inst.get('restart_count', 0),
+            desired_state='stopped',
         )
 
     print('Stopped.')
@@ -557,6 +573,236 @@ async def _cmd_logs(args) -> int:
         signal.signal(signal.SIGINT, original_handler)
 
     print()
+    return 0
+
+
+async def _cmd_reconcile(args) -> int:
+    from .state import _is_pid_alive
+
+    restarted = []
+    skipped = []
+    failed = []
+
+    async with StateDB() as db:
+        desired = await db.find_desired_running()
+
+    for inst in desired:
+        if _is_pid_alive(inst['pid']):
+            skipped.append(inst)
+            continue
+
+        # Re-spawn with the same version
+        version = inst['version']
+        instance_id = inst['id']
+        binary = engine_binary(version)
+
+        if not binary.exists():
+            print(f'  [{instance_id}] Binary missing for v{version}, skipping')
+            failed.append(inst)
+            continue
+
+        port = find_available_port()
+        restart_count = inst.get('restart_count', 0) + 1
+
+        print(f'  [{instance_id}] Restarting v{version} on port {port}...')
+        pid = await spawn_engine(binary, port, instance_id)
+
+        try:
+            log_file = logs_dir(instance_id) / 'stderr.log'
+            await wait_healthy(port, pid=pid, log_file=log_file)
+            async with StateDB() as db:
+                await db.register(instance_id, pid, port, version, 'cli', restart_count=restart_count, desired_state='running')
+            restarted.append(instance_id)
+        except Exception as e:
+            print(f'  [{instance_id}] Health check failed: {e}')
+            await stop_engine(pid)
+            failed.append(inst)
+
+    # Summary
+    if not desired:
+        print('No engines marked for auto-restart.')
+    else:
+        if restarted:
+            print(f'Restarted: {", ".join(restarted)}')
+        if skipped:
+            print(f'Already running: {", ".join(i["id"] for i in skipped)}')
+        if failed:
+            print(f'Failed: {", ".join(i["id"] for i in failed)}')
+
+    return 1 if failed else 0
+
+
+# ── Autostart helpers ─────────────────────────────────────────────
+
+
+def _autostart_task_name():
+    return 'RocketRideEngineReconcile'
+
+
+def _autostart_launchagent_path():
+    from pathlib import Path
+
+    return Path.home() / 'Library' / 'LaunchAgents' / 'com.rocketride.engine.plist'
+
+
+def _autostart_systemd_path():
+    from pathlib import Path
+
+    return Path.home() / '.config' / 'systemd' / 'user' / 'rocketride-engine.service'
+
+
+def _find_rocketride_executable():
+    """Return the path to the rocketride CLI executable."""
+    exe = shutil.which('rocketride')
+    if exe:
+        return exe
+    # Fallback: use sys.executable with -m
+    return f'{sys.executable} -m rocketride'
+
+
+async def _cmd_autostart(args) -> int:
+    enable = getattr(args, 'enable', False)
+    disable = getattr(args, 'disable', False)
+
+    if enable:
+        return await _autostart_enable()
+    elif disable:
+        return await _autostart_disable()
+    else:
+        return await _autostart_status()
+
+
+async def _autostart_enable() -> int:
+    exe = _find_rocketride_executable()
+
+    if sys.platform == 'win32':
+        task_name = _autostart_task_name()
+        cmd = f'{exe} engine reconcile'
+        result = subprocess.run(
+            ['schtasks', '/Create', '/SC', 'ONLOGON', '/TN', task_name, '/TR', cmd, '/F'],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f'Failed to create scheduled task: {result.stderr.strip()}')
+            return 1
+        print(f'Autostart enabled (Task Scheduler: {task_name})')
+
+    elif sys.platform == 'darwin':
+        plist_path = _autostart_launchagent_path()
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Determine command parts for the plist
+        if ' -m ' in exe:
+            parts = exe.split(' ', 2)  # [python, -m, rocketride]
+            program_args = f"""    <array>
+        <string>{parts[0]}</string>
+        <string>{parts[1]}</string>
+        <string>{parts[2]}</string>
+        <string>engine</string>
+        <string>reconcile</string>
+    </array>"""
+        else:
+            program_args = f"""    <array>
+        <string>{exe}</string>
+        <string>engine</string>
+        <string>reconcile</string>
+    </array>"""
+
+        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rocketride.engine</string>
+    <key>ProgramArguments</key>
+{program_args}
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+"""
+        plist_path.write_text(plist_content)
+        print(f'Autostart enabled (LaunchAgent: {plist_path})')
+
+    else:
+        # Linux — systemd user unit
+        unit_path = _autostart_systemd_path()
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+
+        unit_content = f"""[Unit]
+Description=RocketRide Engine Reconcile
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={exe} engine reconcile
+
+[Install]
+WantedBy=default.target
+"""
+        unit_path.write_text(unit_content)
+
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        subprocess.run(['systemctl', '--user', 'enable', 'rocketride-engine.service'], capture_output=True)
+        print(f'Autostart enabled (systemd user unit: {unit_path})')
+
+    return 0
+
+
+async def _autostart_disable() -> int:
+    if sys.platform == 'win32':
+        task_name = _autostart_task_name()
+        result = subprocess.run(
+            ['schtasks', '/Delete', '/TN', task_name, '/F'],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f'No autostart task found (or failed to remove): {result.stderr.strip()}')
+            return 1
+        print('Autostart disabled.')
+
+    elif sys.platform == 'darwin':
+        plist_path = _autostart_launchagent_path()
+        if plist_path.exists():
+            plist_path.unlink()
+            print('Autostart disabled.')
+        else:
+            print('Autostart is not enabled.')
+
+    else:
+        unit_path = _autostart_systemd_path()
+        if unit_path.exists():
+            subprocess.run(['systemctl', '--user', 'disable', 'rocketride-engine.service'], capture_output=True)
+            unit_path.unlink()
+            subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+            print('Autostart disabled.')
+        else:
+            print('Autostart is not enabled.')
+
+    return 0
+
+
+async def _autostart_status() -> int:
+    enabled = False
+
+    if sys.platform == 'win32':
+        task_name = _autostart_task_name()
+        result = subprocess.run(
+            ['schtasks', '/Query', '/TN', task_name],
+            capture_output=True,
+            text=True,
+        )
+        enabled = result.returncode == 0
+
+    elif sys.platform == 'darwin':
+        enabled = _autostart_launchagent_path().exists()
+
+    else:
+        enabled = _autostart_systemd_path().exists()
+
+    print(f'Autostart: {"enabled" if enabled else "disabled"}')
     return 0
 
 

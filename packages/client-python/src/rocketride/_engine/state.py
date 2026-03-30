@@ -33,6 +33,8 @@ _MIGRATIONS = [
     'ALTER TABLE instances ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0',
     # Deduplicate engine instances by version
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_version ON instances (version)',
+    # Track user intent so engines can be restarted after reboot
+    "ALTER TABLE instances ADD COLUMN desired_state TEXT NOT NULL DEFAULT 'stopped'",
 ]
 
 
@@ -147,12 +149,13 @@ class StateDB:
         version: str,
         owner: str,
         restart_count: int = 0,
+        desired_state: str = 'stopped',
     ) -> None:
         """Register a running engine instance."""
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
-            'INSERT OR REPLACE INTO instances (id, pid, port, version, started_at, owner, restart_count) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (instance_id, pid, port, version, now, owner, restart_count),
+            'INSERT OR REPLACE INTO instances (id, pid, port, version, started_at, owner, restart_count, desired_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (instance_id, pid, port, version, now, owner, restart_count, desired_state),
         )
         await self._db.commit()
 
@@ -197,6 +200,20 @@ class StateDB:
         cursor = await self._db.execute('SELECT * FROM instances WHERE version = ?', (version,))
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def set_desired_state(self, instance_id: str, state: str) -> None:
+        """Update the desired_state for a specific instance."""
+        await self._db.execute(
+            'UPDATE instances SET desired_state = ? WHERE id = ?',
+            (state, instance_id),
+        )
+        await self._db.commit()
+
+    async def find_desired_running(self) -> List[Dict[str, Any]]:
+        """Return all instances where desired_state = 'running'."""
+        cursor = await self._db.execute("SELECT * FROM instances WHERE desired_state = 'running' ORDER BY CAST(id AS INTEGER) ASC")
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
 
     async def find_running(self) -> Optional[Dict[str, Any]]:
         """Return the first registered instance whose pid is still alive.

@@ -5,6 +5,7 @@ All tests are self-contained — no live server, no network, no disk
 writes to the real ~/.rocketride directory.
 """
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -203,6 +204,59 @@ class TestStateDB:
             inst = await db.get('x')
             assert inst['pid'] == 2
             assert inst['port'] == 5566
+
+
+class TestDesiredState:
+    @pytest.fixture
+    def tmp_home(self, tmp_path):
+        """Redirect ~/.rocketride to a temp directory."""
+        home = tmp_path / '.rocketride'
+        with patch('rocketride._engine.state.state_db_path', return_value=home / 'instances' / 'state.db'), patch('rocketride._engine.state.ensure_dirs', side_effect=lambda: (home / 'instances').mkdir(parents=True, exist_ok=True)):
+            yield home
+
+    @pytest.mark.asyncio
+    async def test_desired_state_defaults_to_stopped(self, tmp_home):
+        async with StateDB() as db:
+            await db.register('ds-1', 123, 5565, '3.1.0', 'cli')
+            inst = await db.get('ds-1')
+            assert inst['desired_state'] == 'stopped'
+
+    @pytest.mark.asyncio
+    async def test_register_with_desired_state_running(self, tmp_home):
+        async with StateDB() as db:
+            await db.register('ds-2', 123, 5565, '3.1.0', 'cli', desired_state='running')
+            inst = await db.get('ds-2')
+            assert inst['desired_state'] == 'running'
+
+    @pytest.mark.asyncio
+    async def test_set_desired_state(self, tmp_home):
+        async with StateDB() as db:
+            await db.register('ds-3', 123, 5565, '3.1.0', 'cli')
+            await db.set_desired_state('ds-3', 'running')
+            inst = await db.get('ds-3')
+            assert inst['desired_state'] == 'running'
+
+            await db.set_desired_state('ds-3', 'stopped')
+            inst = await db.get('ds-3')
+            assert inst['desired_state'] == 'stopped'
+
+    @pytest.mark.asyncio
+    async def test_find_desired_running(self, tmp_home):
+        async with StateDB() as db:
+            await db.register('a', 1, 5565, '3.0.0', 'cli', desired_state='running')
+            await db.register('b', 2, 5566, '3.1.0', 'cli', desired_state='stopped')
+            await db.register('c', 3, 5567, '3.2.0', 'cli', desired_state='running')
+
+            result = await db.find_desired_running()
+            ids = [r['id'] for r in result]
+            assert ids == ['a', 'c']
+
+    @pytest.mark.asyncio
+    async def test_find_desired_running_empty(self, tmp_home):
+        async with StateDB() as db:
+            await db.register('x', 1, 5565, '3.0.0', 'cli', desired_state='stopped')
+            result = await db.find_desired_running()
+            assert result == []
 
 
 class TestIsPidAlive:
@@ -536,6 +590,202 @@ class TestExceptions:
 
         e = EngineNotFoundError('not found')
         assert str(e) == 'not found'
+
+
+# ── reconcile ─────────────────────────────────────────────────────
+
+
+class TestReconcile:
+    @pytest.fixture
+    def tmp_home(self, tmp_path):
+        """Redirect ~/.rocketride to a temp directory."""
+        home = tmp_path / '.rocketride'
+        with patch('rocketride._engine.state.state_db_path', return_value=home / 'instances' / 'state.db'), patch('rocketride._engine.state.ensure_dirs', side_effect=lambda: (home / 'instances').mkdir(parents=True, exist_ok=True)):
+            yield home
+
+    @pytest.mark.asyncio
+    async def test_reconcile_restarts_dead_desired_running(self, tmp_home, tmp_path):
+        """Reconcile restarts instances with desired_state='running' and dead PID."""
+        from rocketride._engine.cli import _cmd_reconcile
+
+        # Create a fake binary
+        engines = tmp_path / 'engines' / '3.1.0'
+        engines.mkdir(parents=True)
+        fake_binary = engines / 'rocketride-engine'
+        fake_binary.write_text('fake')
+        # Create logs dir
+        log_dir = tmp_path / 'logs' / 'dead-1'
+        log_dir.mkdir(parents=True)
+
+        # Register a dead instance with desired_state='running'
+        async with StateDB() as db:
+            await db.register('dead-1', 999999999, 5565, '3.1.0', 'cli', desired_state='running')
+
+        args = MagicMock()
+
+        with (
+            patch('rocketride._engine.cli.engine_binary', return_value=fake_binary),
+            patch('rocketride._engine.cli.find_available_port', return_value=5570),
+            patch('rocketride._engine.cli.spawn_engine', new_callable=AsyncMock, return_value=12345),
+            patch('rocketride._engine.cli.wait_healthy', new_callable=AsyncMock),
+            patch('rocketride._engine.cli.logs_dir', return_value=log_dir),
+        ):
+            result = await _cmd_reconcile(args)
+
+        assert result == 0
+
+        # Verify the instance was restarted
+        async with StateDB() as db:
+            inst = await db.get('dead-1')
+            assert inst['pid'] == 12345
+            assert inst['port'] == 5570
+            assert inst['desired_state'] == 'running'
+            assert inst['restart_count'] == 1
+
+    @pytest.mark.asyncio
+    async def test_reconcile_skips_alive_instances(self, tmp_home):
+        """Reconcile does not touch instances that are still running."""
+        from rocketride._engine.cli import _cmd_reconcile
+
+        # Register an alive instance (use current PID)
+        async with StateDB() as db:
+            await db.register('alive-1', os.getpid(), 5565, '3.1.0', 'cli', desired_state='running')
+
+        args = MagicMock()
+        result = await _cmd_reconcile(args)
+        assert result == 0
+
+        # Instance should be untouched
+        async with StateDB() as db:
+            inst = await db.get('alive-1')
+            assert inst['pid'] == os.getpid()
+            assert inst['port'] == 5565
+
+    @pytest.mark.asyncio
+    async def test_reconcile_ignores_desired_stopped(self, tmp_home):
+        """Reconcile does not restart instances with desired_state='stopped'."""
+        from rocketride._engine.cli import _cmd_reconcile
+
+        async with StateDB() as db:
+            await db.register('stopped-1', 999999999, 5565, '3.1.0', 'cli', desired_state='stopped')
+
+        args = MagicMock()
+        result = await _cmd_reconcile(args)
+        assert result == 0
+
+        # Instance should be untouched (still dead PID, still stopped)
+        async with StateDB() as db:
+            inst = await db.get('stopped-1')
+            assert inst['pid'] == 999999999
+
+
+# ── autostart ─────────────────────────────────────────────────────
+
+
+class TestAutostart:
+    def test_autostart_enable_creates_artifact_darwin(self, tmp_path):
+        from rocketride._engine.cli import _autostart_enable
+
+        plist_path = tmp_path / 'com.rocketride.engine.plist'
+
+        with (
+            patch.object(sys, 'platform', 'darwin'),
+            patch('rocketride._engine.cli._autostart_launchagent_path', return_value=plist_path),
+            patch('rocketride._engine.cli._find_rocketride_executable', return_value='/usr/local/bin/rocketride'),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(_autostart_enable())
+
+        assert result == 0
+        assert plist_path.exists()
+        content = plist_path.read_text()
+        assert 'com.rocketride.engine' in content
+        assert 'reconcile' in content
+
+    def test_autostart_disable_removes_artifact_darwin(self, tmp_path):
+        from rocketride._engine.cli import _autostart_disable
+
+        plist_path = tmp_path / 'com.rocketride.engine.plist'
+        plist_path.write_text('fake plist')
+
+        with (
+            patch.object(sys, 'platform', 'darwin'),
+            patch('rocketride._engine.cli._autostart_launchagent_path', return_value=plist_path),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(_autostart_disable())
+
+        assert result == 0
+        assert not plist_path.exists()
+
+    def test_autostart_enable_creates_artifact_linux(self, tmp_path):
+        from rocketride._engine.cli import _autostart_enable
+
+        unit_path = tmp_path / 'rocketride-engine.service'
+
+        with (
+            patch.object(sys, 'platform', 'linux'),
+            patch('rocketride._engine.cli._autostart_systemd_path', return_value=unit_path),
+            patch('rocketride._engine.cli._find_rocketride_executable', return_value='/usr/local/bin/rocketride'),
+            patch('rocketride._engine.cli.subprocess.run'),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(_autostart_enable())
+
+        assert result == 0
+        assert unit_path.exists()
+        content = unit_path.read_text()
+        assert 'rocketride engine reconcile' in content
+
+    def test_autostart_disable_removes_artifact_linux(self, tmp_path):
+        from rocketride._engine.cli import _autostart_disable
+
+        unit_path = tmp_path / 'rocketride-engine.service'
+        unit_path.write_text('fake unit')
+
+        with (
+            patch.object(sys, 'platform', 'linux'),
+            patch('rocketride._engine.cli._autostart_systemd_path', return_value=unit_path),
+            patch('rocketride._engine.cli.subprocess.run'),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(_autostart_disable())
+
+        assert result == 0
+        assert not unit_path.exists()
+
+    def test_autostart_enable_creates_task_windows(self):
+        from rocketride._engine.cli import _autostart_enable
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        with (
+            patch.object(sys, 'platform', 'win32'),
+            patch('rocketride._engine.cli._find_rocketride_executable', return_value='rocketride'),
+            patch('rocketride._engine.cli.subprocess.run', return_value=mock_result) as mock_run,
+        ):
+            result = asyncio.get_event_loop().run_until_complete(_autostart_enable())
+
+        assert result == 0
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert 'schtasks' in call_args
+        assert '/Create' in call_args
+
+    def test_autostart_disable_removes_task_windows(self):
+        from rocketride._engine.cli import _autostart_disable
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        with (
+            patch.object(sys, 'platform', 'win32'),
+            patch('rocketride._engine.cli.subprocess.run', return_value=mock_result) as mock_run,
+        ):
+            result = asyncio.get_event_loop().run_until_complete(_autostart_disable())
+
+        assert result == 0
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert 'schtasks' in call_args
+        assert '/Delete' in call_args
 
 
 pytest_plugins = ['pytest_asyncio']
